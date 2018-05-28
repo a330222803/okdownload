@@ -23,6 +23,7 @@ import android.util.SparseArray;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
+import com.liulishuo.okdownload.core.listener.assist.ListenerAssist;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,9 +32,23 @@ import java.util.Map;
 public class UnifiedListenerManager {
 
     final SparseArray<ArrayList<DownloadListener>> realListenerMap;
+    final List<Integer> autoRemoveListenerIdList = new ArrayList<>();
 
     public UnifiedListenerManager() {
         realListenerMap = new SparseArray<>();
+    }
+
+    public synchronized void detachListener(int id) {
+        realListenerMap.remove(id);
+    }
+
+    public synchronized void addAutoRemoveListenersWhenTaskEnd(int id) {
+        if (autoRemoveListenerIdList.contains(id)) return;
+        autoRemoveListenerIdList.add(id);
+    }
+
+    public synchronized void removeAutoRemoveListenersWhenTaskEnd(int id) {
+        autoRemoveListenerIdList.remove((Integer) id);
     }
 
     public synchronized void detachListener(DownloadListener listener) {
@@ -53,7 +68,8 @@ public class UnifiedListenerManager {
         }
     }
 
-    public synchronized boolean detachListener(DownloadTask task, DownloadListener listener) {
+    public synchronized boolean detachListener(@NonNull DownloadTask task,
+                                               DownloadListener listener) {
         final int id = task.getId();
         final List<DownloadListener> listenerList = realListenerMap.get(id);
 
@@ -65,7 +81,8 @@ public class UnifiedListenerManager {
         return result;
     }
 
-    public synchronized void attachListener(DownloadTask task, @NonNull DownloadListener listener) {
+    public synchronized void attachListener(@NonNull DownloadTask task,
+                                            @NonNull DownloadListener listener) {
         final int id = task.getId();
         ArrayList<DownloadListener> listenerList = realListenerMap.get(id);
         if (listenerList == null) {
@@ -75,15 +92,24 @@ public class UnifiedListenerManager {
 
         if (!listenerList.contains(listener)) {
             listenerList.add(listener);
+            if (listener instanceof ListenerAssist) {
+                ((ListenerAssist) listener).setAlwaysRecoverAssistModelIfNotSet(true);
+            }
         }
     }
 
-    public synchronized void attachAndEnqueueIfNotRun(DownloadTask task,
+    /**
+     * Attach the {@code listener} to this manager and enqueue the task if it isn't pending or
+     * running.
+     *
+     * @param task     the task will be enqueue if it isn't running.
+     * @param listener the listener will be attach to this manager.
+     */
+    public synchronized void attachAndEnqueueIfNotRun(@NonNull DownloadTask task,
                                                       @NonNull DownloadListener listener) {
         attachListener(task, listener);
-        final boolean pendingOrRunning = StatusUtil.isSameTaskPendingOrRunning(task);
 
-        if (!pendingOrRunning) {
+        if (!isTaskPendingOrRunning(task)) {
             task.enqueue(hostListener);
         }
     }
@@ -95,6 +121,12 @@ public class UnifiedListenerManager {
         task.enqueue(hostListener);
     }
 
+    /**
+     * Attach the {@code listener} to this manager and execute the {@code task}.
+     *
+     * @param task     the task will be execute.
+     * @param listener the listener will be attached to this manager.
+     */
     public synchronized void executeTaskWithUnifiedListener(@NonNull DownloadTask task,
                                                             @NonNull DownloadListener listener) {
         attachListener(task, listener);
@@ -102,8 +134,13 @@ public class UnifiedListenerManager {
         task.execute(hostListener);
     }
 
-    private final DownloadListener hostListener = new DownloadListener() {
-        @Override public void taskStart(DownloadTask task) {
+    // convenient for unit-test.
+    boolean isTaskPendingOrRunning(@NonNull DownloadTask task) {
+        return StatusUtil.isSameTaskPendingOrRunning(task);
+    }
+
+    final DownloadListener hostListener = new DownloadListener() {
+        @Override public void taskStart(@NonNull DownloadTask task) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -113,8 +150,33 @@ public class UnifiedListenerManager {
             }
         }
 
-        @Override public void downloadFromBeginning(DownloadTask task, BreakpointInfo info,
-                                                    ResumeFailedCause cause) {
+        @Override
+        public void connectTrialStart(@NonNull DownloadTask task,
+                                      @NonNull Map<String, List<String>> requestHeaderFields) {
+            final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
+            if (listeners == null) return;
+
+            for (final DownloadListener realOne : listeners) {
+                if (realOne == null) continue;
+                realOne.connectTrialStart(task, requestHeaderFields);
+            }
+        }
+
+        @Override
+        public void connectTrialEnd(@NonNull DownloadTask task, int responseCode,
+                                    @NonNull Map<String, List<String>> responseHeaderFields) {
+            final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
+            if (listeners == null) return;
+
+            for (final DownloadListener realOne : listeners) {
+                if (realOne == null) continue;
+                realOne.connectTrialEnd(task, responseCode, responseHeaderFields);
+            }
+        }
+
+        @Override
+        public void downloadFromBeginning(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                                          @NonNull ResumeFailedCause cause) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -125,7 +187,8 @@ public class UnifiedListenerManager {
 
         }
 
-        @Override public void downloadFromBreakpoint(DownloadTask task, BreakpointInfo info) {
+        @Override public void downloadFromBreakpoint(@NonNull DownloadTask task,
+                                                     @NonNull BreakpointInfo info) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -135,7 +198,7 @@ public class UnifiedListenerManager {
             }
         }
 
-        @Override public void connectStart(DownloadTask task, int blockIndex,
+        @Override public void connectStart(@NonNull DownloadTask task, int blockIndex,
                                            @NonNull Map<String, List<String>> requestHeaderFields) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
@@ -146,8 +209,9 @@ public class UnifiedListenerManager {
             }
         }
 
-        @Override public void connectEnd(DownloadTask task, int blockIndex, int responseCode,
-                                         @NonNull Map<String, List<String>> responseHeaderFields) {
+        @Override
+        public void connectEnd(@NonNull DownloadTask task, int blockIndex, int responseCode,
+                               @NonNull Map<String, List<String>> responseHeaderFields) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -157,18 +221,8 @@ public class UnifiedListenerManager {
             }
         }
 
-        @Override public void splitBlockEnd(DownloadTask task, BreakpointInfo info) {
-
-            final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
-            if (listeners == null) return;
-
-            for (final DownloadListener realOne : listeners) {
-                if (realOne == null) continue;
-                realOne.splitBlockEnd(task, info);
-            }
-        }
-
-        @Override public void fetchStart(DownloadTask task, int blockIndex, long contentLength) {
+        @Override
+        public void fetchStart(@NonNull DownloadTask task, int blockIndex, long contentLength) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -179,7 +233,8 @@ public class UnifiedListenerManager {
 
         }
 
-        @Override public void fetchProgress(DownloadTask task, int blockIndex, long increaseBytes) {
+        @Override
+        public void fetchProgress(@NonNull DownloadTask task, int blockIndex, long increaseBytes) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -189,7 +244,8 @@ public class UnifiedListenerManager {
             }
         }
 
-        @Override public void fetchEnd(DownloadTask task, int blockIndex, long contentLength) {
+        @Override
+        public void fetchEnd(@NonNull DownloadTask task, int blockIndex, long contentLength) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
@@ -200,13 +256,18 @@ public class UnifiedListenerManager {
         }
 
         @Override
-        public void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause) {
+        public void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                            @Nullable Exception realCause) {
             final DownloadListener[] listeners = getThreadSafeArray(task, realListenerMap);
             if (listeners == null) return;
 
             for (final DownloadListener realOne : listeners) {
                 if (realOne == null) continue;
                 realOne.taskEnd(task, cause, realCause);
+            }
+
+            if (autoRemoveListenerIdList.contains(task.getId())) {
+                detachListener(task.getId());
             }
         }
     };

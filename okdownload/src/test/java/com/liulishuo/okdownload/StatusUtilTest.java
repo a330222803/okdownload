@@ -16,6 +16,10 @@
 
 package com.liulishuo.okdownload;
 
+import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
+import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
+import com.liulishuo.okdownload.core.dispatcher.DownloadDispatcher;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -26,21 +30,20 @@ import org.robolectric.annotation.Config;
 import java.io.File;
 import java.io.IOException;
 
-import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
-import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
-import com.liulishuo.okdownload.core.dispatcher.DownloadDispatcher;
-
 import static com.liulishuo.okdownload.StatusUtil.Status.COMPLETED;
 import static com.liulishuo.okdownload.StatusUtil.Status.PENDING;
 import static com.liulishuo.okdownload.StatusUtil.Status.RUNNING;
 import static com.liulishuo.okdownload.StatusUtil.Status.UNKNOWN;
+import static com.liulishuo.okdownload.TestUtils.assertFile;
 import static com.liulishuo.okdownload.TestUtils.mockOkDownload;
 import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.robolectric.annotation.Config.NONE;
 
 @RunWith(RobolectricTestRunner.class)
@@ -108,6 +111,79 @@ public class StatusUtilTest {
     }
 
     @Test
+    public void isCompletedOrUnknown_infoNotExist() throws IOException {
+        final DownloadTask task = mock(DownloadTask.class);
+        when(task.getUrl()).thenReturn("url");
+        when(task.getParentFile()).thenReturn(file.getParentFile());
+        file.getParentFile().mkdirs();
+        file.createNewFile();
+
+        // filename is null and can't find ---> unknown
+        final BreakpointStore store = OkDownload.with().breakpointStore();
+        doReturn(null).when(store).getResponseFilename(anyString());
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+
+        // filename is null but found on store but not exist ---> unknown
+        doReturn("no-exist-filename").when(store).getResponseFilename(anyString());
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+
+        // filename is null but found on store and exist ---> completed
+        doReturn(file.getName()).when(store).getResponseFilename(anyString());
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.COMPLETED);
+
+        // file name not null and exist
+        when(task.getFilename()).thenReturn(file.getName());
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.COMPLETED);
+
+        // info is only memory cache
+        when(store.isOnlyMemoryCache()).thenReturn(true);
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+    }
+
+    @Test
+    public void isCompletedOrUnknown_infoExist() throws IOException {
+        final DownloadTask task = mock(DownloadTask.class);
+        file.getParentFile().mkdirs();
+        file.createNewFile();
+
+        // case of info exist
+        final BreakpointStore store = OkDownload.with().breakpointStore();
+        final BreakpointInfo info = mock(BreakpointInfo.class);
+        doReturn(info).when(store).get(anyInt());
+
+        // info exist but no filename ---> unknown
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+
+        // info exist but filename not the same ---> unknown
+        when(task.getFilename()).thenReturn("filename");
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+
+        // info exist and filename is the same but file not exist --> unknown
+        when(info.getFilename()).thenReturn("filename");
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+
+        // info exist and filename is null and file from info is exist --> idle
+        when(info.getFile()).thenReturn(file);
+        when(task.getParentFile()).thenReturn(file.getParentFile());
+        when(task.getFilename()).thenReturn(null);
+        when(info.getTotalLength()).thenReturn(1L);
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.IDLE);
+
+        // info exist and filename is the same but offset not the same to total ---> idle
+        when(task.getFilename()).thenReturn("filename");
+        when(task.getFile()).thenReturn(file);
+        when(info.getFile()).thenReturn(file);
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.IDLE);
+
+        // info exist and filename is the same and offset the same to total ---> completed
+        when(info.getTotalOffset()).thenReturn(1L);
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.COMPLETED);
+
+        when(info.getTotalLength()).thenReturn(0L);
+        assertThat(StatusUtil.isCompletedOrUnknown(task)).isEqualTo(StatusUtil.Status.UNKNOWN);
+    }
+
+    @Test
     public void getCurrentInfo() {
         final BreakpointStore store = OkDownload.with().breakpointStore();
         final BreakpointInfo origin = mock(BreakpointInfo.class);
@@ -119,13 +195,37 @@ public class StatusUtilTest {
     }
 
     @Test
-    public void createFinder() throws IOException {
+    public void createFinder() {
         DownloadTask task = StatusUtil.createFinder(url, file.getParent(), null);
-        assertThat(task.getPath()).isNull();
+        assertThat(task.getFile()).isNull();
 
-        assertThat(task.getParentPath()).isEqualTo(file.getParentFile().getAbsolutePath());
+        assertFile(task.getParentFile()).isEqualTo(file.getParentFile());
 
         task = StatusUtil.createFinder(url, file.getParent(), file.getName());
-        assertThat(task.getPath()).isEqualTo(file.getAbsolutePath());
+        assertFile(task.getFile()).isEqualTo(file);
+    }
+
+    @Test
+    public void isSameTaskPendingOrRunning() throws IOException {
+        mockOkDownload();
+
+        final DownloadTask task = mock(DownloadTask.class);
+        final DownloadDispatcher dispatcher = OkDownload.with().downloadDispatcher();
+        when(dispatcher.findSameTask(task)).thenReturn(task);
+        assertThat(StatusUtil.isSameTaskPendingOrRunning(task)).isTrue();
+
+        when(dispatcher.findSameTask(task)).thenReturn(null);
+        assertThat(StatusUtil.isSameTaskPendingOrRunning(task)).isFalse();
+    }
+
+    @Test
+    public void getCurrentInfo_urlParentPathFilename() {
+        final BreakpointStore store = OkDownload.with().breakpointStore();
+        final BreakpointInfo origin = mock(BreakpointInfo.class);
+
+        doReturn(origin).when(store).get(anyInt());
+
+        StatusUtil.getCurrentInfo("https://jacksgong.com", "parentPath", "filename");
+        verify(origin).copy();
     }
 }

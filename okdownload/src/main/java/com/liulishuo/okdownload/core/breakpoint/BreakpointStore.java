@@ -20,26 +20,31 @@ package com.liulishuo.okdownload.core.breakpoint;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
-import java.io.IOException;
-
 import com.liulishuo.okdownload.DownloadTask;
+
+import java.io.IOException;
 
 public interface BreakpointStore {
 
     @Nullable BreakpointInfo get(int id);
 
-    BreakpointInfo createAndInsert(@NonNull DownloadTask task) throws IOException;
-
-    void onSyncToFilesystemSuccess(@NonNull BreakpointInfo info, int blockIndex,
-                                   long increaseLength);
-
-    boolean update(@NonNull BreakpointInfo breakpointInfo) throws IOException;
-
-    void completeDownload(int id);
-
-    void discard(int id);
+    @NonNull BreakpointInfo createAndInsert(@NonNull DownloadTask task) throws IOException;
 
     int findOrCreateId(@NonNull DownloadTask task);
 
-    @Nullable BreakpointInfo findAnotherInfoFromCompare(DownloadTask task, BreakpointInfo ignored);
+    boolean update(@NonNull BreakpointInfo breakpointInfo) throws IOException;
+
+    void remove(int id);
+
+    @Nullable String getResponseFilename(String url);
+
+    @Nullable BreakpointInfo findAnotherInfoFromCompare(@NonNull DownloadTask task,
+                                                        @NonNull BreakpointInfo ignored);
+
+    /**
+     * Whether only store breakpoint on memory cache.
+     *
+     * @return {@code true} if breakpoint on this store is only store on the memory cache.
+     */
+    boolean isOnlyMemoryCache();
 }

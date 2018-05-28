@@ -18,22 +18,28 @@ package com.liulishuo.okdownload.core.download;
 
 import android.support.annotation.NonNull;
 
-import java.io.IOException;
-
+import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
+import com.liulishuo.okdownload.core.exception.FileBusyAfterRunException;
+import com.liulishuo.okdownload.core.exception.InterruptException;
+import com.liulishuo.okdownload.core.exception.PreAllocateException;
 import com.liulishuo.okdownload.core.exception.ResumeFailedException;
+import com.liulishuo.okdownload.core.exception.ServerCanceledException;
 import com.liulishuo.okdownload.core.file.MultiPointOutputStream;
+
+import java.io.IOException;
+import java.net.SocketException;
 
 public class DownloadCache {
     private String redirectLocation;
     private final MultiPointOutputStream outputStream;
 
-    private volatile boolean isPreconditionFailed;
-    private volatile boolean isUserCanceled;
-    private volatile boolean isServerCanceled;
-    private volatile boolean isUnknownError;
-    private volatile boolean isFileBusyAfterRun;
-    private volatile boolean isPreAllocateFailed;
+    private volatile boolean preconditionFailed;
+    private volatile boolean userCanceled;
+    private volatile boolean serverCanceled;
+    private volatile boolean unknownError;
+    private volatile boolean fileBusyAfterRun;
+    private volatile boolean preAllocateFailed;
     private volatile IOException realCause;
 
     DownloadCache(@NonNull MultiPointOutputStream outputStream) {
@@ -58,27 +64,27 @@ public class DownloadCache {
     }
 
     boolean isPreconditionFailed() {
-        return isPreconditionFailed;
+        return preconditionFailed;
     }
 
     public boolean isUserCanceled() {
-        return isUserCanceled;
+        return userCanceled;
     }
 
     boolean isServerCanceled() {
-        return isServerCanceled;
+        return serverCanceled;
     }
 
     boolean isUnknownError() {
-        return isUnknownError;
+        return unknownError;
     }
 
     boolean isFileBusyAfterRun() {
-        return isFileBusyAfterRun;
+        return fileBusyAfterRun;
     }
 
     public boolean isPreAllocateFailed() {
-        return isPreAllocateFailed;
+        return preAllocateFailed;
     }
 
     IOException getRealCause() {
@@ -90,36 +96,56 @@ public class DownloadCache {
     }
 
     public boolean isInterrupt() {
-        return isPreconditionFailed || isUserCanceled || isServerCanceled || isUnknownError
-                || isFileBusyAfterRun || isPreAllocateFailed;
+        return preconditionFailed || userCanceled || serverCanceled || unknownError
+                || fileBusyAfterRun || preAllocateFailed;
     }
 
     public void setPreconditionFailed(IOException realCause) {
-        this.isPreconditionFailed = true;
+        this.preconditionFailed = true;
         this.realCause = realCause;
     }
 
     void setUserCanceled() {
-        this.isUserCanceled = true;
+        this.userCanceled = true;
     }
 
     public void setFileBusyAfterRun() {
-        this.isFileBusyAfterRun = true;
+        this.fileBusyAfterRun = true;
     }
 
     public void setServerCanceled(IOException realCause) {
-        this.isServerCanceled = true;
+        this.serverCanceled = true;
         this.realCause = realCause;
     }
 
     public void setUnknownError(IOException realCause) {
-        this.isUnknownError = true;
+        this.unknownError = true;
         this.realCause = realCause;
     }
 
     public void setPreAllocateFailed(IOException realCause) {
-        this.isPreAllocateFailed = true;
+        this.preAllocateFailed = true;
         this.realCause = realCause;
+    }
+
+    public void catchException(IOException e) {
+        if (isUserCanceled()) return; // ignored
+
+        if (e instanceof ResumeFailedException) {
+            setPreconditionFailed(e);
+        } else if (e instanceof ServerCanceledException) {
+            setServerCanceled(e);
+        } else if (e == FileBusyAfterRunException.SIGNAL) {
+            setFileBusyAfterRun();
+        } else if (e instanceof PreAllocateException) {
+            setPreAllocateFailed(e);
+        } else if (e != InterruptException.SIGNAL) {
+            setUnknownError(e);
+            if (!(e instanceof SocketException)) {
+                // we know socket exception, so ignore it,  otherwise print stack trace.
+                Util.d("DownloadCache", "catch unknown error " + e);
+            }
+        }
     }
 
     static class PreError extends DownloadCache {

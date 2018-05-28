@@ -16,24 +16,29 @@
 
 package com.liulishuo.okdownload.core.listener;
 
+import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.cause.EndCause;
+import com.liulishuo.okdownload.core.listener.assist.Listener1Assist;
 
 /**
  * started->connected->progress<-->progress(currentOffset)-> completed/canceled/error/warn
  */
 public abstract class DownloadListener3 extends DownloadListener1 {
-    @Override public void taskStart(DownloadTask task) {
+    @Override
+    public final void taskStart(@NonNull DownloadTask task,
+                                @NonNull Listener1Assist.Listener1Model model) {
         started(task);
     }
 
-    @Override
-    public final void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause) {
+    @Override public void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                                  @Nullable Exception realCause,
+                                  @NonNull Listener1Assist.Listener1Model model) {
         switch (cause) {
-            case COMPLETE:
+            case COMPLETED:
                 completed(task);
                 break;
             case CANCELED:
@@ -52,13 +57,13 @@ public abstract class DownloadListener3 extends DownloadListener1 {
         }
     }
 
-    protected abstract void started(DownloadTask task);
+    protected abstract void started(@NonNull DownloadTask task);
 
-    protected abstract void completed(DownloadTask task);
+    protected abstract void completed(@NonNull DownloadTask task);
 
-    protected abstract void canceled(DownloadTask task);
+    protected abstract void canceled(@NonNull DownloadTask task);
 
-    protected abstract void error(DownloadTask task, Exception e);
+    protected abstract void error(@NonNull DownloadTask task, @NonNull Exception e);
 
-    protected abstract void warn(DownloadTask task);
+    protected abstract void warn(@NonNull DownloadTask task);
 }

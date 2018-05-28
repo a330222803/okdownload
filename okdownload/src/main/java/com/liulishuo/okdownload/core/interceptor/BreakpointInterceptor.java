@@ -16,181 +16,109 @@
 
 package com.liulishuo.okdownload.core.interceptor;
 
+import android.support.annotation.IntRange;
 import android.support.annotation.NonNull;
 
-import java.io.File;
-import java.io.IOException;
-
-import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.OkDownload;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
-import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
 import com.liulishuo.okdownload.core.download.DownloadChain;
-import com.liulishuo.okdownload.core.download.DownloadStrategy;
 import com.liulishuo.okdownload.core.exception.InterruptException;
 import com.liulishuo.okdownload.core.exception.RetryException;
 import com.liulishuo.okdownload.core.file.MultiPointOutputStream;
 
-import static com.liulishuo.okdownload.core.download.DownloadChain.CHUNKED_CONTENT_LENGTH;
+import java.io.IOException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static com.liulishuo.okdownload.core.Util.CHUNKED_CONTENT_LENGTH;
+import static com.liulishuo.okdownload.core.Util.CONTENT_LENGTH;
+import static com.liulishuo.okdownload.core.Util.CONTENT_RANGE;
+import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.CONTENT_LENGTH_CHANGED;
 
 public class BreakpointInterceptor implements Interceptor.Connect, Interceptor.Fetch {
+
     private static final String TAG = "BreakpointInterceptor";
 
-    @Override
+    @NonNull @Override
     public DownloadConnection.Connected interceptConnect(DownloadChain chain) throws IOException {
         final DownloadConnection.Connected connected = chain.processConnect();
-        final DownloadStrategy strategy = OkDownload.with().downloadStrategy();
-        boolean isReuseAnotherSameInfo = false;
         final BreakpointInfo info = chain.getInfo();
 
         if (chain.getCache().isInterrupt()) {
             throw InterruptException.SIGNAL;
         }
 
-        // handle first connect.
-        if (chain.isOtherBlockPark()) {
-            // only can on the first block.
-            if (chain.getBlockIndex() != 0) throw new IOException();
+        if (info.getBlockCount() == 1 && !info.isChunked()) {
+            // only one block to download this resource
+            // use this block response header instead of trial result if they are different.
+            final long blockInstanceLength = getExactContentLengthRangeFrom0(connected);
+            final long infoInstanceLength = info.getTotalLength();
+            if (blockInstanceLength > 0 && blockInstanceLength != infoInstanceLength) {
+                Util.d(TAG, "SingleBlock special check: the response instance-length["
+                        + blockInstanceLength + "] isn't equal to the instance length from trial-"
+                        + "connection[" + infoInstanceLength + "]");
+                final BlockInfo blockInfo = info.getBlock(0);
+                boolean isFromBreakpoint = blockInfo.getRangeLeft() != 0;
 
-            final long contentLength = chain.getResponseContentLength();
+                final BlockInfo newBlockInfo = new BlockInfo(0, blockInstanceLength);
+                info.resetBlockInfos();
+                info.addBlock(newBlockInfo);
 
-            isReuseAnotherSameInfo = inspectAnotherSameInfo(chain.getTask(), info, contentLength);
-
-            if (!isReuseAnotherSameInfo && strategy.isSplitBlock(contentLength, connected)) {
-                discardOldFileIfExist(chain.getInfo().getPath());
-
-                // split
-                final int blockCount = strategy.determineBlockCount(chain.getTask(), contentLength,
-                        connected);
-                splitBlock(blockCount, chain);
+                if (isFromBreakpoint) {
+                    final String msg = "Discard breakpoint because of on this special case, we have"
+                            + " to download from beginning";
+                    Util.w(TAG, msg);
+                    throw new RetryException(msg);
+                }
+                OkDownload.with().callbackDispatcher().dispatch()
+                        .downloadFromBeginning(chain.getTask(), info, CONTENT_LENGTH_CHANGED);
             }
-
-            OkDownload.with().callbackDispatcher().dispatch().splitBlockEnd(chain.getTask(), info);
-
-            chain.unparkOtherBlock();
         }
 
         // update for connected.
-        final BreakpointStore store = OkDownload.with().breakpointStore();
-        if (!store.update(info)) {
-            throw new IOException("Update store failed!");
-        }
-
-        final long firstRangeLeft = info.getBlock(0).getRangeLeft();
-        if (isReuseAnotherSameInfo
-                && firstRangeLeft > strategy.reconnectFirstBlockThresholdBytes()) {
-            Util.d(TAG, "Retry the first block since its range left is turn to " + firstRangeLeft);
-            throw new RetryException(
-                    "Retry since the range left of the fist block is changed larger than 5120byte");
+        final DownloadStore store = chain.getDownloadStore();
+        try {
+            if (!store.update(info)) {
+                throw new IOException("Update store failed!");
+            }
+        } catch (Exception e) {
+            throw new IOException("Update store failed!", e);
         }
 
         return connected;
-    }
-
-    void splitBlock(int blockCount, DownloadChain chain) throws IOException {
-        final long totalLength = chain.getResponseContentLength();
-        if (blockCount < 1) {
-            throw new IOException("Block Count from strategy determine must be larger than 0, "
-                    + "the current one is " + blockCount);
-        }
-
-        final BreakpointInfo info = chain.getInfo();
-
-        info.resetBlockInfos();
-        final long eachLength = totalLength / blockCount;
-        long startOffset = 0;
-        long contentLength = 0;
-        for (int i = 0; i < blockCount; i++) {
-            startOffset = startOffset + contentLength;
-            if (i == 0) {
-                // first block
-                final long remainLength = totalLength % blockCount;
-                contentLength = eachLength + remainLength;
-            } else {
-                contentLength = eachLength;
-            }
-
-            final BlockInfo blockInfo = new BlockInfo(startOffset, contentLength);
-            info.addBlock(blockInfo);
-        }
-    }
-
-    // this case meet only if there are another info task is idle and is the same after
-    // this task has filename.
-    boolean inspectAnotherSameInfo(DownloadTask task, BreakpointInfo info,
-                                   long totalLength) throws RetryException {
-        if (!task.isUriIsDirectory()) return false;
-
-        final BreakpointStore store = OkDownload.with().breakpointStore();
-        final BreakpointInfo anotherInfo = store.findAnotherInfoFromCompare(task, info);
-        if (anotherInfo == null) return false;
-
-        store.discard(anotherInfo.getId());
-
-        if (anotherInfo.getTotalOffset()
-                <= OkDownload.with().downloadStrategy().reuseIdledSameInfoThresholdBytes()) {
-            return false;
-        }
-
-        if (anotherInfo.getEtag() != null && !anotherInfo.getEtag().equals(info.getEtag())) {
-            return false;
-        }
-
-        if (anotherInfo.getTotalLength() != totalLength) {
-            return false;
-        }
-
-        if (!new File(anotherInfo.getPath()).exists()) return false;
-
-        info.reuseBlocks(anotherInfo);
-
-        Util.d(TAG, "Reuse another same info: " + info);
-        return true;
-    }
-
-    void discardOldFileIfExist(@NonNull String path) {
-        final File oldFile = new File(path);
-        if (oldFile.exists()) OkDownload.with().processFileStrategy().discardOldFile(oldFile);
     }
 
     @Override
     public long interceptFetch(DownloadChain chain) throws IOException {
         final long contentLength = chain.getResponseContentLength();
         final int blockIndex = chain.getBlockIndex();
-        final BreakpointInfo info = chain.getInfo();
-        final BlockInfo blockInfo = info.getBlock(blockIndex);
-        final long blockLength = blockInfo.getContentLength();
-        final boolean isMultiBlock = !info.isSingleBlock();
         final boolean isNotChunked = contentLength != CHUNKED_CONTENT_LENGTH;
 
-        long rangeLeft = blockInfo.getRangeLeft();
         long fetchLength = 0;
         long processFetchLength;
-        boolean isFirstBlockLenienceRule = false;
 
-        while (true) {
-            processFetchLength = chain.loopFetch();
-            if (processFetchLength == -1) {
-                break;
-            }
+        final MultiPointOutputStream outputStream = chain.getOutputStream();
 
-            fetchLength += processFetchLength;
-            if (isNotChunked && isMultiBlock && blockIndex == 0
-                    && Util.isFirstBlockMeetLenienceFull(rangeLeft + fetchLength, blockLength)) {
-                isFirstBlockLenienceRule = true;
-                break;
+        try {
+            while (true) {
+                processFetchLength = chain.loopFetch();
+                if (processFetchLength == -1) {
+                    break;
+                }
+
+                fetchLength += processFetchLength;
             }
+        } finally {
+            // finish
+            chain.flushNoCallbackIncreaseBytes();
+            if (!chain.getCache().isUserCanceled()) outputStream.done(blockIndex);
         }
 
-        // finish
-        chain.flushNoCallbackIncreaseBytes();
-        final MultiPointOutputStream outputStream = chain.getOutputStream();
-        outputStream.ensureSyncComplete(blockIndex);
-
-        if (!isFirstBlockLenienceRule && isNotChunked) {
+        if (isNotChunked) {
             // local persist data check.
             outputStream.inspectComplete(blockIndex);
 
@@ -201,8 +129,43 @@ public class BreakpointInterceptor implements Interceptor.Connect, Interceptor.F
             }
         }
 
-
         return fetchLength;
     }
 
+    private static final Pattern CONTENT_RANGE_RIGHT_VALUE = Pattern
+            .compile(".*\\d+ *- *(\\d+) */ *\\d+");
+
+    /**
+     * Get the exactly content-length, on this method we assume the range is from 0.
+     */
+    @IntRange(from = -1)
+    long getExactContentLengthRangeFrom0(@NonNull DownloadConnection.Connected connected) {
+        final String contentRangeField = connected.getResponseHeaderField(CONTENT_RANGE);
+        long contentLength = -1;
+        if (!Util.isEmpty(contentRangeField)) {
+            final long rightRange = getRangeRightFromContentRange(contentRangeField);
+            // for the range from 0, the contentLength is just right-range +1.
+            if (rightRange > 0) contentLength = rightRange + 1;
+        }
+
+        if (contentLength < 0) {
+            // content-length
+            final String contentLengthField = connected.getResponseHeaderField(CONTENT_LENGTH);
+            if (!Util.isEmpty(contentLengthField)) {
+                contentLength = Long.parseLong(contentLengthField);
+            }
+        }
+
+        return contentLength;
+    }
+
+    @IntRange(from = -1)
+    static long getRangeRightFromContentRange(@NonNull String contentRange) {
+        Matcher m = CONTENT_RANGE_RIGHT_VALUE.matcher(contentRange);
+        if (m.find()) {
+            return Long.parseLong(m.group(1));
+        }
+
+        return -1;
+    }
 }

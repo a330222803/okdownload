@@ -20,8 +20,10 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Build;
 import android.os.ParcelFileDescriptor;
-import android.system.ErrnoException;
+import android.support.annotation.NonNull;
 import android.system.Os;
+
+import com.liulishuo.okdownload.core.Util;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -30,22 +32,31 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 
-import com.liulishuo.okdownload.core.Util;
-
 public class DownloadUriOutputStream implements DownloadOutputStream {
 
-    private FileChannel channel;
-    private ParcelFileDescriptor pdf;
-    private BufferedOutputStream out;
+    @NonNull private final FileChannel channel;
+    @NonNull final ParcelFileDescriptor pdf;
+    @NonNull final BufferedOutputStream out;
+    @NonNull final FileOutputStream fos;
 
     public DownloadUriOutputStream(Context context, Uri uri, int bufferSize) throws
             FileNotFoundException {
-        pdf = context.getContentResolver().openFileDescriptor(uri, "rw");
-        if (pdf == null) throw new IllegalArgumentException();
+        final ParcelFileDescriptor pdf = context.getContentResolver().openFileDescriptor(uri, "rw");
+        if (pdf == null) throw new FileNotFoundException("result of " + uri + " is null!");
+        this.pdf = pdf;
 
-        final FileOutputStream fos = new FileOutputStream(pdf.getFileDescriptor());
-        channel = fos.getChannel();
-        out = new BufferedOutputStream(fos, bufferSize);
+        this.fos = new FileOutputStream(pdf.getFileDescriptor());
+        this.channel = fos.getChannel();
+        this.out = new BufferedOutputStream(fos, bufferSize);
+    }
+
+    DownloadUriOutputStream(@NonNull FileChannel channel, @NonNull ParcelFileDescriptor pdf,
+                            @NonNull FileOutputStream fos,
+                            @NonNull BufferedOutputStream out) {
+        this.channel = channel;
+        this.pdf = pdf;
+        this.fos = fos;
+        this.out = out;
     }
 
     @Override
@@ -56,6 +67,7 @@ public class DownloadUriOutputStream implements DownloadOutputStream {
     @Override
     public void close() throws IOException {
         out.close();
+        fos.close();
     }
 
     @Override
@@ -70,15 +82,14 @@ public class DownloadUriOutputStream implements DownloadOutputStream {
     }
 
     @Override
-    public void setLength(long newLength) throws IOException {
+    public void setLength(long newLength) {
         final String tag = "DownloadUriOutputStream";
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             try {
                 Os.ftruncate(pdf.getFileDescriptor(), newLength);
-            } catch (ErrnoException e) {
+            } catch (Throwable e) {
                 Util.w(tag, "It can't pre-allocate length(" + newLength + ") on the sdk"
                         + " version(" + Build.VERSION.SDK_INT + "), because of " + e);
-                e.printStackTrace();
             }
         } else {
             Util.w(tag,

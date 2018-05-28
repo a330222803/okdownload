@@ -16,8 +16,12 @@
 
 package com.liulishuo.okdownload.core.connection;
 
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
+
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.ProtocolException;
 import java.net.URLConnection;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +31,29 @@ public interface DownloadConnection {
     int NO_RESPONSE_CODE = 0;
 
     void addHeader(String name, String value);
+
+    /**
+     * Set the method for the request, one of:
+     * <UL>
+     * <LI>GET
+     * <LI>POST
+     * <LI>HEAD
+     * <LI>OPTIONS
+     * <LI>PUT
+     * <LI>DELETE
+     * <LI>TRACE
+     * </UL> are legal, subject to protocol restrictions.  The default
+     * method is GET.
+     *
+     * @param method the HTTP method
+     * @return {@code true} if set effect, otherwise {@code false}.
+     * @throws ProtocolException if the method cannot be reset or if
+     *                           the requested method isn't valid for HTTP.
+     * @throws SecurityException if a security manager is set and the
+     *                           method is "TRACE", but the "allowHttpTrace"
+     *                           NetPermission is not granted.
+     */
+    boolean setRequestMethod(@NonNull String method) throws ProtocolException;
 
     /**
      * Invokes the request immediately, and blocks until the response can be processed or is in
@@ -45,7 +72,6 @@ public interface DownloadConnection {
 
         InputStream getInputStream() throws IOException;
 
-
         /**
          * Returns an unmodifiable Map of the header fields. The Map keys are Strings that represent
          * the response-header field names. Each Map value is an unmodifiable List of Strings that
@@ -55,7 +81,7 @@ public interface DownloadConnection {
          *
          * @return a Map of header fields
          */
-        Map<String, List<String>> getResponseHeaderFields();
+        @Nullable Map<String, List<String>> getResponseHeaderFields();
 
         /**
          * Returns the value of the named header field, which would be the response-header field.
@@ -67,7 +93,7 @@ public interface DownloadConnection {
          * @return the value of the named header field, or <code>null</code>
          * if there is no such field in the header.
          */
-        String getResponseHeaderField(String name);
+        @Nullable String getResponseHeaderField(String name);
     }
 
     interface Factory {

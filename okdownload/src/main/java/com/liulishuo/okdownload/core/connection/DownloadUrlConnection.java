@@ -16,9 +16,12 @@
 
 package com.liulishuo.okdownload.core.connection;
 
+import android.support.annotation.NonNull;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.ProtocolException;
 import java.net.Proxy;
 import java.net.URL;
 import java.net.URLConnection;
@@ -28,6 +31,10 @@ import java.util.Map;
 public class DownloadUrlConnection implements DownloadConnection, DownloadConnection.Connected {
 
     protected URLConnection connection;
+
+    DownloadUrlConnection(URLConnection connection) {
+        this.connection = connection;
+    }
 
     public DownloadUrlConnection(String originUrl, Configuration configuration) throws IOException {
         this(new URL(originUrl), configuration);
@@ -73,12 +80,20 @@ public class DownloadUrlConnection implements DownloadConnection, DownloadConnec
         }
 
         return DownloadConnection.NO_RESPONSE_CODE;
-
     }
 
     @Override
     public InputStream getInputStream() throws IOException {
         return connection.getInputStream();
+    }
+
+    @Override public boolean setRequestMethod(@NonNull String method) throws ProtocolException {
+        if (connection instanceof HttpURLConnection) {
+            ((HttpURLConnection) connection).setRequestMethod(method);
+            return true;
+        }
+
+        return false;
     }
 
     @Override
@@ -93,8 +108,11 @@ public class DownloadUrlConnection implements DownloadConnection, DownloadConnec
 
     @Override
     public void release() {
-        if (connection instanceof HttpURLConnection) {
-            ((HttpURLConnection) connection).disconnect();
+        // the same to response#close on okhttp
+        // real execute RealBufferedSource.InputStream#close
+        try {
+            connection.getInputStream().close();
+        } catch (IOException ignored) {
         }
     }
 
@@ -131,6 +149,7 @@ public class DownloadUrlConnection implements DownloadConnection, DownloadConnec
     /**
      * The sample configuration for the {@link DownloadUrlConnection}
      */
+    @SuppressWarnings("PMD.AvoidFieldNameMatchingMethodName")
     public static class Configuration {
         private Proxy proxy;
         private Integer readTimeout;

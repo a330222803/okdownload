@@ -19,14 +19,12 @@ package com.liulishuo.okdownload;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-
+import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
-import com.liulishuo.okdownload.core.breakpoint.BreakpointStoreOnCache;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
-import com.liulishuo.okdownload.core.connection.DownloadUrlConnection;
 import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
 import com.liulishuo.okdownload.core.dispatcher.DownloadDispatcher;
 import com.liulishuo.okdownload.core.download.DownloadStrategy;
@@ -34,6 +32,7 @@ import com.liulishuo.okdownload.core.file.DownloadOutputStream;
 import com.liulishuo.okdownload.core.file.DownloadUriOutputStream;
 import com.liulishuo.okdownload.core.file.ProcessFileStrategy;
 
+@SuppressWarnings("PMD.AvoidFieldNameMatchingMethodName")
 public class OkDownload {
 
     @SuppressLint("StaticFieldLeak") static volatile OkDownload singleton;
@@ -48,21 +47,23 @@ public class OkDownload {
 
     private final Context context;
 
-    DownloadMonitor monitor;
+    @Nullable DownloadMonitor monitor;
 
     OkDownload(Context context, DownloadDispatcher downloadDispatcher,
-               CallbackDispatcher callbackDispatcher, BreakpointStore breakpointStore,
+               CallbackDispatcher callbackDispatcher, DownloadStore store,
                DownloadConnection.Factory connectionFactory,
                DownloadOutputStream.Factory outputStreamFactory,
                ProcessFileStrategy processFileStrategy, DownloadStrategy downloadStrategy) {
         this.context = context;
         this.downloadDispatcher = downloadDispatcher;
         this.callbackDispatcher = callbackDispatcher;
-        this.breakpointStore = breakpointStore;
+        this.breakpointStore = store;
         this.connectionFactory = connectionFactory;
         this.outputStreamFactory = outputStreamFactory;
         this.processFileStrategy = processFileStrategy;
         this.downloadStrategy = downloadStrategy;
+
+        this.downloadDispatcher.setDownloadStore(Util.createRemitDatabase(store));
     }
 
     public DownloadDispatcher downloadDispatcher() { return downloadDispatcher; }
@@ -81,8 +82,12 @@ public class OkDownload {
 
     public Context context() { return this.context; }
 
-    public void setMonitor(DownloadMonitor monitor) {
+    public void setMonitor(@Nullable DownloadMonitor monitor) {
         this.monitor = monitor;
+    }
+
+    @Nullable public DownloadMonitor getMonitor() {
+        return monitor;
     }
 
     public static OkDownload with() {
@@ -115,17 +120,13 @@ public class OkDownload {
     public static class Builder {
         private DownloadDispatcher downloadDispatcher;
         private CallbackDispatcher callbackDispatcher;
-        private BreakpointStore breakpointStore;
+        private DownloadStore downloadStore;
         private DownloadConnection.Factory connectionFactory;
         private ProcessFileStrategy processFileStrategy;
         private DownloadStrategy downloadStrategy;
         private DownloadOutputStream.Factory outputStreamFactory;
         private DownloadMonitor monitor;
         private final Context context;
-
-        // You can import through com.liulishuo.okdownload:sqlite:{version}
-        private static final String STORE_ON_SQLITE
-                = "com.liulishuo.okdownload.core.breakpoint.BreakpointStoreOnSQLite";
 
         public Builder(@NonNull Context context) {
             this.context = context.getApplicationContext();
@@ -141,8 +142,8 @@ public class OkDownload {
             return this;
         }
 
-        public Builder breakpointStore(BreakpointStore breakpointStore) {
-            this.breakpointStore = breakpointStore;
+        public Builder downloadStore(DownloadStore downloadStore) {
+            this.downloadStore = downloadStore;
             return this;
         }
 
@@ -180,23 +181,12 @@ public class OkDownload {
                 callbackDispatcher = new CallbackDispatcher();
             }
 
-            if (breakpointStore == null) {
-                try {
-                    final Constructor constructor = Class.forName(STORE_ON_SQLITE)
-                            .getDeclaredConstructor(Context.class);
-                    breakpointStore = (BreakpointStore) constructor.newInstance(context);
-                } catch (ClassNotFoundException ignored) {
-                } catch (InstantiationException ignored) {
-                } catch (IllegalAccessException ignored) {
-                } catch (NoSuchMethodException ignored) {
-                } catch (InvocationTargetException ignored) {
-                }
-
-                if (breakpointStore == null) breakpointStore = new BreakpointStoreOnCache();
+            if (downloadStore == null) {
+                downloadStore = Util.createDefaultDatabase(context);
             }
 
             if (connectionFactory == null) {
-                connectionFactory = new DownloadUrlConnection.Factory();
+                connectionFactory = Util.createDefaultConnectionFactory();
             }
 
             if (outputStreamFactory == null) {
@@ -212,11 +202,13 @@ public class OkDownload {
             }
 
             OkDownload okDownload = new OkDownload(context, downloadDispatcher, callbackDispatcher,
-                    breakpointStore, connectionFactory, outputStreamFactory, processFileStrategy,
+                    downloadStore, connectionFactory, outputStreamFactory, processFileStrategy,
                     downloadStrategy);
 
             okDownload.setMonitor(monitor);
 
+            Util.d("OkDownload", "downloadStore[" + downloadStore + "] connectionFactory["
+                    + connectionFactory);
             return okDownload;
         }
     }

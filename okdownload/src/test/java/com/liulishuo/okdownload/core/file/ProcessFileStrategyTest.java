@@ -16,7 +16,9 @@
 
 package com.liulishuo.okdownload.core.file;
 
-import org.junit.After;
+import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.OkDownload;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mock;
@@ -24,20 +26,9 @@ import org.mockito.Mock;
 import java.io.File;
 import java.io.IOException;
 
-import com.liulishuo.okdownload.DownloadListener;
-import com.liulishuo.okdownload.DownloadTask;
-import com.liulishuo.okdownload.OkDownload;
-import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
-
 import static com.liulishuo.okdownload.TestUtils.mockOkDownload;
-import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.FILE_NOT_EXIST;
-import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.INFO_DIRTY;
-import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.OUTPUT_STREAM_NOT_SUPPORT;
 import static org.assertj.core.api.Java6Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -45,103 +36,59 @@ public class ProcessFileStrategyTest {
     private ProcessFileStrategy strategy;
 
     @Mock private DownloadTask task;
-    @Mock private BreakpointInfo info;
-    private final String existPath = "./exist-path/";
 
     @Before
     public void setup() throws IOException {
         initMocks(this);
         strategy = new ProcessFileStrategy();
-        new File(existPath).createNewFile();
-    }
-
-    @After
-    public void tearDown() {
-        new File(existPath).delete();
     }
 
     @Test
     public void discardProcess() throws IOException {
-        when(task.getPath()).thenReturn("mock path");
+        final File existFile = new File("./exist-path");
+        existFile.createNewFile();
+
+        when(task.getFile()).thenReturn(existFile);
 
         strategy.discardProcess(task);
-        // nothing need to test.
+
+        assertThat(existFile.exists()).isFalse();
+    }
+
+    @Test(expected = IOException.class)
+    public void discardProcess_deleteFailed() throws IOException {
+        final File file = mock(File.class);
+        when(task.getFile()).thenReturn(file);
+        when(file.exists()).thenReturn(true);
+        when(file.delete()).thenReturn(false);
+
+        strategy.discardProcess(task);
     }
 
     @Test
-    public void resumeAvailableLocalCheck() throws IOException {
+    public void isPreAllocateLength() throws IOException {
         mockOkDownload();
-        ProcessFileStrategy.ResumeAvailableLocalCheck check;
-        final DownloadListener listener = OkDownload.with().callbackDispatcher().dispatch();
-        final DownloadOutputStream.Factory outputStreamFactory = OkDownload.with()
-                .outputStreamFactory();
-        final ProcessFileStrategy strategyOnOkDownload = OkDownload.with().processFileStrategy();
 
-        // available.
-        final String noExistPath = "./no-exist-path/";
-        when(task.getPath()).thenReturn(existPath);
-        when(info.getBlockCount()).thenReturn(2);
-        when(info.getPath()).thenReturn(existPath);
-        when(outputStreamFactory.supportSeek()).thenReturn(true);
+        // no pre-allocate set on task.
+        when(task.getSetPreAllocateLength()).thenReturn(null);
 
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isTrue();
-        check.callbackCause();
-        verify(listener).downloadFromBreakpoint(eq(task), eq(info));
+        final DownloadOutputStream.Factory factory = OkDownload.with().outputStreamFactory();
+        when(factory.supportSeek()).thenReturn(false);
 
-        // file not exist
-        when(task.getPath()).thenReturn(noExistPath);
-        when(info.getPath()).thenReturn(noExistPath);
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener).downloadFromBeginning(eq(task), eq(info), eq(FILE_NOT_EXIST));
+        assertThat(strategy.isPreAllocateLength(task)).isFalse();
+        when(factory.supportSeek()).thenReturn(true);
 
-        // no filename
-        when(task.getPath()).thenReturn(null);
-        when(info.getPath()).thenReturn(null);
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener).downloadFromBeginning(eq(task), eq(info), eq(INFO_DIRTY));
+        assertThat(strategy.isPreAllocateLength(task)).isTrue();
 
-        // info not right
-        when(task.getPath()).thenReturn(existPath);
-        when(info.getPath()).thenReturn(noExistPath);
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener, times(2)).downloadFromBeginning(eq(task), eq(info), eq(INFO_DIRTY));
+        // pre-allocate set on task.
+        when(task.getSetPreAllocateLength()).thenReturn(false);
+        assertThat(strategy.isPreAllocateLength(task)).isFalse();
 
-        when(info.getPath()).thenReturn(existPath);
-        when(info.getBlockCount()).thenReturn(0);
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener, times(3)).downloadFromBeginning(eq(task), eq(info), eq(INFO_DIRTY));
+        when(task.getSetPreAllocateLength()).thenReturn(true);
+        assertThat(strategy.isPreAllocateLength(task)).isTrue();
 
-        // output stream not support
-        when(info.getBlockCount()).thenReturn(3);
-        when(outputStreamFactory.supportSeek()).thenReturn(false);
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener).downloadFromBeginning(eq(task), eq(info), eq(OUTPUT_STREAM_NOT_SUPPORT));
-
-        when(info.getBlockCount()).thenReturn(1);
-        doReturn(false).when(strategyOnOkDownload).isPreAllocateLength();
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isTrue();
-        check.callbackCause();
-        verify(listener, times(2)).downloadFromBreakpoint(eq(task), eq(info));
-
-        when(outputStreamFactory.supportSeek()).thenReturn(false);
-        doReturn(true).when(strategyOnOkDownload).isPreAllocateLength();
-        check = strategy.resumeAvailableLocalCheck(task, info);
-        assertThat(check.isAvailable()).isFalse();
-        check.callbackCause();
-        verify(listener, times(2))
-                .downloadFromBeginning(eq(task), eq(info), eq(OUTPUT_STREAM_NOT_SUPPORT));
+        // pre-allocate set on task is true but can't support seek.
+        when(factory.supportSeek()).thenReturn(false);
+        assertThat(strategy.isPreAllocateLength(task)).isFalse();
     }
-
 }

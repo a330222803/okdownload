@@ -16,15 +16,14 @@
 
 package com.liulishuo.okdownload;
 
-import android.net.Uri;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
-
-import java.io.File;
 
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
 import com.liulishuo.okdownload.core.dispatcher.DownloadDispatcher;
+
+import java.io.File;
 
 public class StatusUtil {
 
@@ -34,16 +33,15 @@ public class StatusUtil {
 
     public static Status getStatus(@NonNull DownloadTask task) {
 
-        if (isCompleted(task)) return Status.COMPLETED;
+        final Status status = isCompletedOrUnknown(task);
+        if (status == Status.COMPLETED) return Status.COMPLETED;
 
         final DownloadDispatcher dispatcher = OkDownload.with().downloadDispatcher();
 
         if (dispatcher.isPending(task)) return Status.PENDING;
         if (dispatcher.isRunning(task)) return Status.RUNNING;
 
-        if (task.getFilename() == null) return Status.UNKNOWN;
-
-        return Status.IDLE;
+        return status;
     }
 
     public static Status getStatus(@NonNull String url, @NonNull String parentPath,
@@ -52,18 +50,48 @@ public class StatusUtil {
     }
 
     public static boolean isCompleted(@NonNull DownloadTask task) {
-        if (task.getFilename() == null) return false; //unknown filename can't recognize
+        return isCompletedOrUnknown(task) == Status.COMPLETED;
+    }
 
-        return isCompleted(task.getUrl(), task.getParentPath(), task.getFilename());
+    public static Status isCompletedOrUnknown(@NonNull DownloadTask task) {
+        final BreakpointStore store = OkDownload.with().breakpointStore();
+        final BreakpointInfo info = store.get(task.getId());
+
+        @Nullable String filename = task.getFilename();
+        @NonNull final File parentFile = task.getParentFile();
+        @Nullable final File targetFile = task.getFile();
+
+        if (info != null) {
+            if (!info.isChunked() && info.getTotalLength() <= 0) {
+                return Status.UNKNOWN;
+            } else if ((targetFile != null && targetFile.equals(info.getFile()))
+                    && targetFile.exists()
+                    && info.getTotalOffset() == info.getTotalLength()) {
+                return Status.COMPLETED;
+            } else if (filename == null && info.getFile() != null
+                    && info.getFile().exists()) {
+                return Status.IDLE;
+            } else if (targetFile != null && targetFile.equals(info.getFile())
+                    && targetFile.exists()) {
+                return Status.IDLE;
+            }
+        } else if (store.isOnlyMemoryCache()) {
+            return Status.UNKNOWN;
+        } else if (targetFile != null && targetFile.exists()) {
+            return Status.COMPLETED;
+        } else {
+            filename = store.getResponseFilename(task.getUrl());
+            if (filename != null && new File(parentFile, filename).exists()) {
+                return Status.COMPLETED;
+            }
+        }
+
+        return Status.UNKNOWN;
     }
 
     public static boolean isCompleted(@NonNull String url, @NonNull String parentPath,
-                                      @NonNull String filename) {
-        final BreakpointStore store = OkDownload.with().breakpointStore();
-        final int id = store.findOrCreateId(createFinder(url, parentPath, filename));
-
-        // because we remove info if task is completed, so if it exist it must be not completed.
-        return store.get(id) == null && new File(parentPath, filename).exists();
+                                      @Nullable String filename) {
+        return isCompleted(createFinder(url, parentPath, filename));
     }
 
     @Nullable public static BreakpointInfo getCurrentInfo(@NonNull String url,
@@ -84,10 +112,7 @@ public class StatusUtil {
     @NonNull static DownloadTask createFinder(@NonNull String url,
                                               @NonNull String parentPath,
                                               @Nullable String filename) {
-        final Uri uri = Uri.fromFile(new File(parentPath));
-
-        return new DownloadTask.Builder(url, uri)
-                .setFilename(filename)
+        return new DownloadTask.Builder(url, parentPath, filename)
                 .build();
     }
 

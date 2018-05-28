@@ -17,10 +17,18 @@
 package com.liulishuo.okdownload.sample;
 
 
+import android.os.Bundle;
+import android.support.annotation.Nullable;
+
+import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.sample.base.BaseListActivity;
-import com.liulishuo.okdownload.sample.comprehensive.ComprehensiveActivity;
 
 public class MainActivity extends BaseListActivity {
+
+    @Override protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Util.enableConsoleLog();
+    }
 
     @Override protected void setupAdapter(BaseListActivity.ItemsHolder holder) {
         holder.addItem(R.string.single_download_title, R.string.single_download_desc,
@@ -29,10 +37,16 @@ public class MainActivity extends BaseListActivity {
                 EachBlockProgressActivity.class);
         holder.addItem(R.string.queue_download_title, R.string.queue_download_desc,
                 QueueActivity.class);
-        holder.addItem(R.string.task_manager_title, R.string.task_manager_desc,
-                ManagerActivity.class);
-        holder.addItem(R.string.comprehensive_case_title, R.string.comprehensive_case_desc,
-                ComprehensiveActivity.class);
+        holder.addItem(R.string.bunch_download_title, R.string.bunch_download_desc,
+                BunchActivity.class);
+//        holder.addItem(R.string.task_manager_title, R.string.task_manager_desc,
+//                ManagerActivity.class);
+        holder.addItem(R.string.title_content_uri, R.string.content_uri_desc,
+                ContentUriActivity.class);
+        holder.addItem(R.string.title_notification, R.string.notification_desc,
+                NotificationActivity.class);
+//        holder.addItem(R.string.comprehensive_case_title, R.string.comprehensive_case_desc,
+//                ComprehensiveActivity.class);
     }
 
     @Override public int titleRes() {

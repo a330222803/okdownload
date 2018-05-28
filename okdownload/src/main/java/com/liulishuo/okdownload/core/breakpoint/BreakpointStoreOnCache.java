@@ -17,35 +17,50 @@
 package com.liulishuo.okdownload.core.breakpoint;
 
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.util.SparseArray;
 
+import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.core.IdentifiedTask;
+import com.liulishuo.okdownload.core.cause.EndCause;
+
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 
-import com.liulishuo.okdownload.DownloadTask;
-
-public class BreakpointStoreOnCache implements BreakpointStore {
+public class BreakpointStoreOnCache implements DownloadStore {
     private final SparseArray<BreakpointInfo> storedInfos;
+    private final HashMap<String, String> responseFilenameMap;
 
-    private final SparseArray<DownloadTask> unStoredTasks;
+    @NonNull private final KeyToIdMap keyToIdMap;
+
+    private final SparseArray<IdentifiedTask> unStoredTasks;
     private final List<Integer> sortedOccupiedIds;
 
     public BreakpointStoreOnCache() {
-        this(new SparseArray<BreakpointInfo>());
+        this(new SparseArray<BreakpointInfo>(), new HashMap<String, String>());
     }
 
     BreakpointStoreOnCache(SparseArray<BreakpointInfo> storedInfos,
-                           SparseArray<DownloadTask> unStoredTasks,
-                           List<Integer> sortedOccupiedIds) {
+                           HashMap<String, String> responseFilenameMap,
+                           SparseArray<IdentifiedTask> unStoredTasks,
+                           List<Integer> sortedOccupiedIds,
+                           KeyToIdMap keyToIdMap) {
         this.unStoredTasks = unStoredTasks;
         this.storedInfos = storedInfos;
+        this.responseFilenameMap = responseFilenameMap;
         this.sortedOccupiedIds = sortedOccupiedIds;
+        this.keyToIdMap = keyToIdMap;
     }
 
-    public BreakpointStoreOnCache(SparseArray<BreakpointInfo> storedInfos) {
+    public BreakpointStoreOnCache(SparseArray<BreakpointInfo> storedInfos,
+                                  HashMap<String, String> responseFilenameMap) {
         this.unStoredTasks = new SparseArray<>();
         this.storedInfos = storedInfos;
+        this.responseFilenameMap = responseFilenameMap;
+        this.keyToIdMap = new KeyToIdMap();
 
         final int count = storedInfos.size();
 
@@ -61,33 +76,45 @@ public class BreakpointStoreOnCache implements BreakpointStore {
         return storedInfos.get(id);
     }
 
-    @Override
+    @NonNull @Override
     public BreakpointInfo createAndInsert(@NonNull DownloadTask task) {
         final int id = task.getId();
 
-        BreakpointInfo newInfo = new BreakpointInfo(id, task.getUrl(), task.getParentPath(),
+        BreakpointInfo newInfo = new BreakpointInfo(id, task.getUrl(), task.getParentFile(),
                 task.getFilename());
-        storedInfos.put(id, newInfo);
-        unStoredTasks.remove(id);
+        synchronized (this) {
+            storedInfos.put(id, newInfo);
+            unStoredTasks.remove(id);
+        }
         return newInfo;
     }
 
+    @Override public void onTaskStart(int id) {
+    }
+
     @Override public void onSyncToFilesystemSuccess(@NonNull BreakpointInfo info, int blockIndex,
-                                                    long increaseLength) {
+                                                    long increaseLength) throws IOException {
         final BreakpointInfo onCacheOne = this.storedInfos.get(info.id);
-        if (info != onCacheOne) throw new IllegalArgumentException("Info not on store!");
+        if (info != onCacheOne) throw new IOException("Info not on store!");
 
         onCacheOne.getBlock(blockIndex).increaseCurrentOffset(increaseLength);
     }
 
     @Override
     public boolean update(@NonNull BreakpointInfo breakpointInfo) {
+        final String filename = breakpointInfo.getFilename();
+        if (breakpointInfo.isTaskOnlyProvidedParentPath() && filename != null) {
+            this.responseFilenameMap.put(breakpointInfo.getUrl(), filename);
+        }
+
         final BreakpointInfo onCacheOne = this.storedInfos.get(breakpointInfo.id);
         if (onCacheOne != null) {
             if (onCacheOne == breakpointInfo) return true;
 
             // replace
-            this.storedInfos.put(breakpointInfo.id, breakpointInfo.copy());
+            synchronized (this) {
+                this.storedInfos.put(breakpointInfo.id, breakpointInfo.copy());
+            }
             return true;
         }
 
@@ -95,43 +122,56 @@ public class BreakpointStoreOnCache implements BreakpointStore {
     }
 
     @Override
-    public synchronized void completeDownload(int id) {
-        storedInfos.remove(id);
-        if (unStoredTasks.get(id) == null) sortedOccupiedIds.remove(Integer.valueOf(id));
+    public void onTaskEnd(int id, @NonNull EndCause cause, @Nullable Exception exception) {
+        if (cause == EndCause.COMPLETED) {
+            remove(id);
+        }
     }
 
-    @Override public synchronized void discard(int id) {
+    @Nullable @Override public BreakpointInfo getAfterCompleted(int id) {
+        return null;
+    }
+
+    @Override public synchronized void remove(int id) {
         storedInfos.remove(id);
         if (unStoredTasks.get(id) == null) sortedOccupiedIds.remove(Integer.valueOf(id));
+        keyToIdMap.remove(id);
     }
 
     @Override
     public synchronized int findOrCreateId(@NonNull DownloadTask task) {
-        final SparseArray<BreakpointInfo> clonedMap = storedInfos.clone();
-        final int size = clonedMap.size();
+        final Integer candidate = keyToIdMap.get(task);
+        if (candidate != null) return candidate;
+
+        final int size = storedInfos.size();
         for (int i = 0; i < size; i++) {
-            final BreakpointInfo info = clonedMap.valueAt(i);
-            if (info.isSameFrom(task)) {
+            final BreakpointInfo info = storedInfos.valueAt(i);
+            if (info != null && info.isSameFrom(task)) {
                 return info.id;
             }
         }
 
         final int unStoredSize = unStoredTasks.size();
         for (int i = 0; i < unStoredSize; i++) {
-            final DownloadTask another = unStoredTasks.valueAt(i);
+            final IdentifiedTask another = unStoredTasks.valueAt(i);
             if (another == null) continue;
             if (another.compareIgnoreId(task)) return another.getId();
         }
 
         final int id = allocateId();
-        unStoredTasks.put(id, task);
+        unStoredTasks.put(id, task.mock(id));
+        keyToIdMap.add(task, id);
         return id;
     }
 
     // info maybe turn to equal to another one after get filename from response.
     @Override
-    public BreakpointInfo findAnotherInfoFromCompare(DownloadTask task, BreakpointInfo ignored) {
-        final SparseArray<BreakpointInfo> clonedMap = storedInfos.clone();
+    public BreakpointInfo findAnotherInfoFromCompare(@NonNull DownloadTask task,
+                                                     @NonNull BreakpointInfo ignored) {
+        final SparseArray<BreakpointInfo> clonedMap;
+        synchronized (this) {
+            clonedMap = storedInfos.clone();
+        }
         final int size = clonedMap.size();
         for (int i = 0; i < size; i++) {
             final BreakpointInfo info = clonedMap.valueAt(i);
@@ -145,7 +185,15 @@ public class BreakpointStoreOnCache implements BreakpointStore {
         return null;
     }
 
-    private static final int FIRST_ID = 1;
+    @Override public boolean isOnlyMemoryCache() {
+        return true;
+    }
+
+    @Nullable @Override public String getResponseFilename(String url) {
+        return responseFilenameMap.get(url);
+    }
+
+    public static final int FIRST_ID = 1;
 
     synchronized int allocateId() {
         int newId = 0;
@@ -196,5 +244,4 @@ public class BreakpointStoreOnCache implements BreakpointStore {
 
         return newId;
     }
-
 }

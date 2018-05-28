@@ -16,20 +16,43 @@
 
 package com.liulishuo.okdownload;
 
+import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
+import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
+import com.liulishuo.okdownload.core.cause.EndCause;
+import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
+
+/**
+ * If you set monitor to okdownload, the lifecycle of every task on okdownload will be caught and
+ * callback to this monitor.
+ *
+ * @see OkDownload#setMonitor(DownloadMonitor)
+ * @see OkDownload.Builder#setMonitor(DownloadMonitor)
+ */
 public interface DownloadMonitor {
-    void start(DownloadTask task);
+    void taskStart(DownloadTask task);
 
-    void success(DownloadTask task);
+    /**
+     * Call this monitor function when the {@code task} just end trial connection, and its
+     * {@code info} is ready and also certain this task will resume from the past breakpoint.
+     *
+     * @param task the target task.
+     * @param info has certainly total-length and offset-length now.
+     */
+    void taskDownloadFromBreakpoint(@NonNull DownloadTask task, @NonNull BreakpointInfo info);
 
-    void failed(DownloadTask task, FailedCause cause, @Nullable Exception realCause);
+    /**
+     * Call this monitor function when the {@code task} just end trial connection, and its
+     * {@code info} is ready and also certain this task will download from the very beginning.
+     *
+     * @param task  the target task.
+     * @param info  has certainly total-length and offset-length now.
+     * @param cause the cause of why download from the very beginning instead of from the past
+     *              breakpoint.
+     */
+    void taskDownloadFromBeginning(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                                   @Nullable ResumeFailedCause cause);
 
-    enum FailedCause {
-        error,
-        stop,
-        fileBusy,
-        sameIdBusy,
-    }
-
+    void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause);
 }

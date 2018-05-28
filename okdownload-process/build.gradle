@@ -9,12 +9,6 @@ android {
         targetCompatibility rootProject.ext.targetCompatibilityVersion
     }
 
-    lintOptions {
-        textOutput 'stdout'
-        textReport true
-        lintConfig file('lint.xml')
-    }
-
     dexOptions {
         preDexLibraries = !rootProject.ext.isCi
     }
@@ -25,7 +19,7 @@ android {
 }
 
 dependencies {
-    testCompile dep.junit
-    testCompile dep.mockito
-    testCompile dep.assertj
+    testImplementation dep.junit
+    testImplementation dep.mockito
+    testImplementation dep.assertj
 }

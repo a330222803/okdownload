@@ -16,6 +16,14 @@
 
 package com.liulishuo.okdownload.core.interceptor;
 
+import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.OkDownload;
+import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
+import com.liulishuo.okdownload.core.download.DownloadCache;
+import com.liulishuo.okdownload.core.download.DownloadChain;
+import com.liulishuo.okdownload.core.download.DownloadStrategy;
+import com.liulishuo.okdownload.core.file.MultiPointOutputStream;
+
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -23,13 +31,6 @@ import org.mockito.Mock;
 
 import java.io.IOException;
 import java.io.InputStream;
-
-import com.liulishuo.okdownload.DownloadTask;
-import com.liulishuo.okdownload.OkDownload;
-import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
-import com.liulishuo.okdownload.core.download.DownloadCache;
-import com.liulishuo.okdownload.core.download.DownloadChain;
-import com.liulishuo.okdownload.core.file.MultiPointOutputStream;
 
 import static com.liulishuo.okdownload.TestUtils.mockOkDownload;
 import static org.mockito.ArgumentMatchers.any;
@@ -59,6 +60,7 @@ public class FetchDataInterceptorTest {
 
         interceptor = new FetchDataInterceptor(0, inputStream, outputStream, task);
         when(chain.getCache()).thenReturn(mock(DownloadCache.class));
+        when(chain.getTask()).thenReturn(task);
     }
 
     @Test
@@ -70,6 +72,8 @@ public class FetchDataInterceptorTest {
 
         interceptor.interceptFetch(chain);
 
+        final DownloadStrategy downloadStrategy = OkDownload.with().downloadStrategy();
+        verify(downloadStrategy).inspectNetworkOnWifi(eq(task));
         verify(chain).increaseCallbackBytes(10L);
         verify(chain).flushNoCallbackIncreaseBytes();
         verify(outputStream).write(eq(0), any(byte[].class), eq(10));

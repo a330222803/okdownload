@@ -16,6 +16,7 @@
 
 package com.liulishuo.okdownload.core.download;
 
+import android.os.SystemClock;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
@@ -25,12 +26,13 @@ import com.liulishuo.okdownload.core.NamedRunnable;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
-import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.cause.EndCause;
-import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
+import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
 import com.liulishuo.okdownload.core.file.MultiPointOutputStream;
 import com.liulishuo.okdownload.core.file.ProcessFileStrategy;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -41,37 +43,58 @@ import java.util.concurrent.Future;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.LockSupport;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 public class DownloadCall extends NamedRunnable implements Comparable<DownloadCall> {
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(0, Integer.MAX_VALUE,
             60, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
             Util.threadFactory("OkDownload Block", false));
 
+    private static final String TAG = "DownloadCall";
+
     static final int MAX_COUNT_RETRY_FOR_PRECONDITION_FAILED = 1;
     public final DownloadTask task;
     public final boolean asyncExecuted;
-    private final ArrayList<DownloadChain> blockChainList;
+    @NonNull private final ArrayList<DownloadChain> blockChainList;
 
-    @Nullable private volatile DownloadCache cache;
-    private volatile boolean canceled;
+    @Nullable volatile DownloadCache cache;
+    volatile boolean canceled;
+    volatile boolean finishing;
 
-    private DownloadCall(DownloadTask task, boolean asyncExecuted) {
+    private volatile Thread currentThread;
+    @NonNull private final DownloadStore store;
+
+    private DownloadCall(DownloadTask task, boolean asyncExecuted, @NonNull DownloadStore store) {
+        this(task, asyncExecuted, new ArrayList<DownloadChain>(), store);
+    }
+
+    DownloadCall(DownloadTask task, boolean asyncExecuted,
+                 @NonNull ArrayList<DownloadChain> runningBlockList,
+                 @NonNull DownloadStore store) {
         super("download call: " + task.getId());
         this.task = task;
         this.asyncExecuted = asyncExecuted;
-        this.blockChainList = new ArrayList<>();
+        this.blockChainList = runningBlockList;
+        this.store = store;
     }
 
-    public static DownloadCall create(DownloadTask task, boolean asyncExecuted) {
-        return new DownloadCall(task, asyncExecuted);
+    public static DownloadCall create(DownloadTask task, boolean asyncExecuted,
+                                      @NonNull DownloadStore store) {
+        return new DownloadCall(task, asyncExecuted, store);
     }
 
-    public void cancel() {
-        if (canceled) return;
+    public boolean cancel() {
+        synchronized (this) {
+            if (canceled) return false;
+            if (finishing) return false;
+            this.canceled = true;
+        }
+
+        final long startCancelTime = SystemClock.uptimeMillis();
+
         OkDownload.with().downloadDispatcher().flyingCanceled(this);
 
-        this.canceled = true;
         final DownloadCache cache = this.cache;
         if (cache != null) cache.setUserCanceled();
 
@@ -79,98 +102,184 @@ public class DownloadCall extends NamedRunnable implements Comparable<DownloadCa
         for (DownloadChain chain : chains) {
             chain.cancel();
         }
+
+        if (chains.isEmpty() && currentThread != null) {
+            Util.d(TAG,
+                    "interrupt thread with cancel operation because of chains are not running "
+                            + task.getId());
+            currentThread.interrupt();
+        }
+
+        if (cache != null) cache.getOutputStream().cancelAsync();
+
+        Util.d(TAG, "cancel task " + task.getId() + " consume: " + (SystemClock
+                .uptimeMillis() - startCancelTime) + "ms");
+        return true;
     }
 
     public boolean isCanceled() { return canceled; }
 
+    public boolean isFinishing() { return finishing; }
+
     @Override
     public void execute() throws InterruptedException {
-        boolean retry = false;
+        currentThread = Thread.currentThread();
+
+        boolean retry;
         int retryCount = 0;
 
+        // ready param
         final OkDownload okDownload = OkDownload.with();
-        final CallbackDispatcher dispatcher = okDownload.callbackDispatcher();
-        final BreakpointStore store = okDownload.breakpointStore();
         final ProcessFileStrategy fileStrategy = okDownload.processFileStrategy();
 
-        dispatcher.dispatch().taskStart(task);
-        while (true) {
-            if (canceled) break;
-
-            // get store
-            BreakpointInfo info = store.get(task.getId());
-            if (info == null) {
-                try {
-                    info = store.createAndInsert(task);
-                } catch (IOException e) {
-                    this.cache = new DownloadCache.PreError(e);
-                    break;
-                }
+        // inspect task start
+        inspectTaskStart();
+        do {
+            // 0. check basic param before start
+            if (task.getUrl().length() <= 0) {
+                this.cache = new DownloadCache.PreError(
+                        new IOException("unexpected url: " + task.getUrl()));
+                break;
             }
 
-            final MultiPointOutputStream outputStream = fileStrategy.createProcessStream(task,
-                    info);
-            final DownloadCache cache = createCache(outputStream);
+            if (canceled) break;
+
+            // 1. create basic info if not exist
+            @NonNull final BreakpointInfo info;
+            try {
+                BreakpointInfo infoOnStore = store.get(task.getId());
+                if (infoOnStore == null) {
+                    info = store.createAndInsert(task);
+                } else {
+                    info = infoOnStore;
+                }
+                setInfoToTask(info);
+            } catch (IOException e) {
+                this.cache = new DownloadCache.PreError(e);
+                break;
+            }
+            if (canceled) break;
+
+            // ready cache.
+            @NonNull final DownloadCache cache = createCache(info);
             this.cache = cache;
 
+            // 2. remote check.
+            final BreakpointRemoteCheck remoteCheck = createRemoteCheck(info);
+            try {
+                remoteCheck.check();
+            } catch (IOException e) {
+                cache.catchException(e);
+                break;
+            }
+
+            // 3. waiting for file lock release after file path is confirmed.
+            fileStrategy.getFileLock().waitForRelease(task.getFile().getAbsolutePath());
+
+            // 4. reuse another info if another info is idle and available for reuse.
+            OkDownload.with().downloadStrategy()
+                    .inspectAnotherSameInfo(task, info, remoteCheck.getInstanceLength());
+
+            try {
+                if (remoteCheck.isResumable()) {
+                    // 5. local check
+                    final BreakpointLocalCheck localCheck = createLocalCheck(info,
+                            remoteCheck.getInstanceLength());
+                    localCheck.check();
+                    if (localCheck.isDirty()) {
+                        Util.d(TAG, "breakpoint invalid: download from beginning because of "
+                                + "local check is dirty " + task.getId() + " " + localCheck);
+                        // 6. assemble block data
+                        fileStrategy.discardProcess(task);
+                        assembleBlockAndCallbackFromBeginning(info, remoteCheck,
+                                localCheck.getCauseOrThrow());
+                    } else {
+                        okDownload.callbackDispatcher().dispatch()
+                                .downloadFromBreakpoint(task, info);
+                    }
+                } else {
+                    Util.d(TAG, "breakpoint invalid: download from beginning because of "
+                            + "remote check not resumable " + task.getId() + " " + remoteCheck);
+                    // 6. assemble block data
+                    fileStrategy.discardProcess(task);
+                    assembleBlockAndCallbackFromBeginning(info, remoteCheck,
+                            remoteCheck.getCauseOrThrow());
+                }
+            } catch (IOException e) {
+                cache.setUnknownError(e);
+                break;
+            }
+
+            // 7. start with cache and info.
+            start(cache, info);
+
             if (canceled) break;
 
-            if (retry) {
-                try {
-                    fileStrategy.discardProcess(task);
-                    start(cache, info, false);
-                } catch (IOException e) {
-                    cache.setUnknownError(e);
-                }
-            } else {
-                final String filenameOnStore = info.getFilename();
-                if (!Util.isEmpty(filenameOnStore)) {
-                    okDownload.downloadStrategy().validFilenameFromResume(filenameOnStore, task);
-                }
-
-                final ProcessFileStrategy.ResumeAvailableLocalCheck localCheck =
-                        okDownload.processFileStrategy().resumeAvailableLocalCheck(task, info);
-
-                localCheck.callbackCause();
-
-                start(cache, info, localCheck.isAvailable());
-            }
-
-            // finish
-            blockChainList.clear();
-
-            if (cache.isUserCanceled()) break;
-
+            // 8. retry if precondition failed.
             if (cache.isPreconditionFailed()
                     && retryCount++ < MAX_COUNT_RETRY_FOR_PRECONDITION_FAILED) {
-                store.discard(task.getId());
-                // try again from beginning.
-                dispatcher.dispatch().downloadFromBeginning(task, info,
-                        cache.getResumeFailedCause());
+                store.remove(task.getId());
                 retry = true;
-                continue;
-            }
-
-            if (cache.isServerCanceled() || cache.isUnknownError()
-                    || cache.isPreconditionFailed()) {
-                // error
-                dispatcher.dispatch().taskEnd(task, EndCause.ERROR, cache.getRealCause());
-            } else if (cache.isFileBusyAfterRun()) {
-                dispatcher.dispatch().taskEnd(task, EndCause.FILE_BUSY, null);
-            } else if (cache.isPreAllocateFailed()) {
-                dispatcher.dispatch().taskEnd(task, EndCause.PRE_ALLOCATE_FAILED,
-                        cache.getRealCause());
             } else {
-                dispatcher.dispatch().taskEnd(task, EndCause.COMPLETE, null);
-                store.completeDownload(task.getId());
-                fileStrategy.completeProcessStream(outputStream, task);
+                retry = false;
             }
-            break;
+        } while (retry);
+
+        // finish
+        finishing = true;
+        blockChainList.clear();
+
+        final DownloadCache cache = this.cache;
+        if (canceled || cache == null) return;
+
+        final EndCause cause;
+        Exception realCause = null;
+        if (cache.isServerCanceled() || cache.isUnknownError()
+                || cache.isPreconditionFailed()) {
+            // error
+            cause = EndCause.ERROR;
+            realCause = cache.getRealCause();
+        } else if (cache.isFileBusyAfterRun()) {
+            cause = EndCause.FILE_BUSY;
+        } else if (cache.isPreAllocateFailed()) {
+            cause = EndCause.PRE_ALLOCATE_FAILED;
+            realCause = cache.getRealCause();
+        } else {
+            cause = EndCause.COMPLETED;
         }
+        inspectTaskEnd(cache, cause, realCause);
+    }
+
+    private void inspectTaskStart() {
+        store.onTaskStart(task.getId());
+        OkDownload.with().callbackDispatcher().dispatch().taskStart(task);
+    }
+
+    private void inspectTaskEnd(DownloadCache cache, @NonNull EndCause cause,
+                                @Nullable Exception realCause) {
+        // non-cancel handled on here
+        if (cause == EndCause.CANCELED) {
+            throw new IllegalAccessError("can't recognize cancelled on here");
+        }
+
+        synchronized (this) {
+            if (canceled) return;
+            finishing = true;
+        }
+
+        store.onTaskEnd(task.getId(), cause, realCause);
+        if (cause == EndCause.COMPLETED) {
+            OkDownload.with().processFileStrategy()
+                    .completeProcessStream(cache.getOutputStream(), task);
+        }
+
+        OkDownload.with().callbackDispatcher().dispatch().taskEnd(task, cause, realCause);
     }
 
     // this method is convenient for unit-test.
-    DownloadCache createCache(MultiPointOutputStream outputStream) {
+    DownloadCache createCache(@NonNull BreakpointInfo info) {
+        final MultiPointOutputStream outputStream = OkDownload.with().processFileStrategy()
+                .createProcessStream(task, info, store);
         return new DownloadCache(outputStream);
     }
 
@@ -179,83 +288,41 @@ public class DownloadCall extends NamedRunnable implements Comparable<DownloadCa
         return task.getPriority();
     }
 
-    void start(final DownloadCache cache, BreakpointInfo info,
-               boolean isResumeAvailableFromLocalCheck) throws InterruptedException {
-        if (isResumeAvailableFromLocalCheck) {
-            // resume task
-            final int blockCount = info.getBlockCount();
-            final List<DownloadChain> blockChainList = new ArrayList<>(info.getBlockCount());
-            final long totalLength = info.getTotalLength();
-            for (int i = 0; i < blockCount; i++) {
-                final BlockInfo blockInfo = info.getBlock(i);
-                if (Util.isBlockComplete(i, blockCount, blockInfo)) continue;
-
-                Util.resetBlockIfDirty(i, blockCount, totalLength, blockInfo);
-                blockChainList.add(DownloadChain.createChain(i, task, info, cache));
+    void start(final DownloadCache cache, BreakpointInfo info) throws InterruptedException {
+        final int blockCount = info.getBlockCount();
+        final List<DownloadChain> blockChainList = new ArrayList<>(info.getBlockCount());
+        for (int i = 0; i < blockCount; i++) {
+            final BlockInfo blockInfo = info.getBlock(i);
+            if (Util.isCorrectFull(blockInfo.getCurrentOffset(), blockInfo.getContentLength())) {
+                continue;
             }
 
-            if (cache.isInterrupt()) {
-                return;
-            }
-
-            startBlocks(blockChainList);
-        } else {
-            // new task
-            info.resetInfo();
-
-            // add 0 task first.
-            info.addBlock(new BlockInfo(0, 0));
-            // block until first block get response.
-            final Thread parkThread = Thread.currentThread();
-            final DownloadChain firstChain = DownloadChain.createFirstBlockChain(parkThread, task,
-                    info, cache);
-            if (cache.isInterrupt()) {
-                return;
-            }
-            final Future firstBlockFuture = startFirstBlock(firstChain);
-            blockChainList.add(firstChain);
-            if (!firstChain.isFinished()) {
-                parkForFirstConnection();
-            }
-
-            if (cache.isInterrupt()) {
-                return;
-            }
-
-            // start other blocks after unpark on BreakpointInterceptor#interceptConnect
-            final int blockCount = info.getBlockCount();
-            final List<DownloadChain> blockChainList = new ArrayList<>(info.getBlockCount() - 1);
-            for (int i = 1; i < blockCount; i++) {
-                blockChainList.add(DownloadChain.createChain(i, task, info, cache));
-            }
-            startBlocks(blockChainList);
-            if (!firstBlockFuture.isDone()) {
-                try {
-                    firstBlockFuture.get();
-                } catch (CancellationException | ExecutionException ignore) {
-                }
-            }
+            Util.resetBlockIfDirty(blockInfo);
+            blockChainList.add(DownloadChain.createChain(i, task, info, cache, store));
         }
+
+        if (canceled) {
+            return;
+        }
+
+        startBlocks(blockChainList);
     }
 
     @Override
-    protected void canceled(InterruptedException e) {
+    protected void interrupted(InterruptedException e) {
     }
 
     @Override
     protected void finished() {
         OkDownload.with().downloadDispatcher().finish(this);
-    }
-
-    void parkForFirstConnection() {
-        LockSupport.park();
+        Util.d(TAG, "call is finished " + task.getId());
     }
 
     void startBlocks(List<DownloadChain> tasks) throws InterruptedException {
         ArrayList<Future> futures = new ArrayList<>(tasks.size());
         try {
             for (DownloadChain chain : tasks) {
-                futures.add(EXECUTOR.submit(chain));
+                futures.add(submitChain(chain));
             }
 
             blockChainList.addAll(tasks);
@@ -277,10 +344,44 @@ public class DownloadCall extends NamedRunnable implements Comparable<DownloadCa
         }
     }
 
-    Future<?> startFirstBlock(DownloadChain firstChain) {
-        return EXECUTOR.submit(firstChain);
+    // convenient for unit-test
+    @NonNull BreakpointLocalCheck createLocalCheck(@NonNull BreakpointInfo info,
+                                                   long responseInstanceLength) {
+        return new BreakpointLocalCheck(task, info, responseInstanceLength);
     }
 
+    // convenient for unit-test
+    @NonNull BreakpointRemoteCheck createRemoteCheck(@NonNull BreakpointInfo info) {
+        return new BreakpointRemoteCheck(task, info);
+    }
+
+    // convenient for unit-test
+    void setInfoToTask(@NonNull BreakpointInfo info) {
+        DownloadTask.TaskHideWrapper.setBreakpointInfo(task, info);
+    }
+
+    void assembleBlockAndCallbackFromBeginning(@NonNull BreakpointInfo info,
+                                               @NonNull BreakpointRemoteCheck remoteCheck,
+                                               @NonNull ResumeFailedCause failedCause) {
+        Util.assembleBlock(task, info, remoteCheck.getInstanceLength(),
+                remoteCheck.isAcceptRange());
+        OkDownload.with().callbackDispatcher().dispatch()
+                .downloadFromBeginning(task, info, failedCause);
+    }
+
+    Future<?> submitChain(DownloadChain chain) {
+        return EXECUTOR.submit(chain);
+    }
+
+    public boolean equalsTask(@NonNull DownloadTask task) {
+        return this.task.equals(task);
+    }
+
+    @Nullable public File getFile() {
+        return this.task.getFile();
+    }
+
+    @SuppressFBWarnings(value = "Eq", justification = "This special case is just for task priority")
     @Override
     public int compareTo(@NonNull DownloadCall o) {
         return o.getPriority() - getPriority();

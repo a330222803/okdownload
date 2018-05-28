@@ -16,13 +16,7 @@
 
 package com.liulishuo.okdownload.core.interceptor.connect;
 
-import android.support.annotation.Nullable;
-
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import android.support.annotation.NonNull;
 
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.OkDownload;
@@ -32,31 +26,34 @@ import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
 import com.liulishuo.okdownload.core.download.DownloadChain;
 import com.liulishuo.okdownload.core.download.DownloadStrategy;
-import com.liulishuo.okdownload.core.exception.FileBusyAfterRunException;
 import com.liulishuo.okdownload.core.exception.InterruptException;
 import com.liulishuo.okdownload.core.interceptor.Interceptor;
 
-import static com.liulishuo.okdownload.core.download.DownloadChain.CHUNKED_CONTENT_LENGTH;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static com.liulishuo.okdownload.core.Util.CONTENT_LENGTH;
+import static com.liulishuo.okdownload.core.Util.CONTENT_RANGE;
+import static com.liulishuo.okdownload.core.Util.IF_MATCH;
+import static com.liulishuo.okdownload.core.Util.RANGE;
+import static com.liulishuo.okdownload.core.Util.USER_AGENT;
 
 public class HeaderInterceptor implements Interceptor.Connect {
     private static final String TAG = "HeaderInterceptor";
 
-    @Override
+    @NonNull @Override
     public DownloadConnection.Connected interceptConnect(DownloadChain chain) throws IOException {
         final BreakpointInfo info = chain.getInfo();
         final DownloadConnection connection = chain.getConnectionOrCreate();
         final DownloadTask task = chain.getTask();
 
         // add user customize header
-        final Map<String, List<String>> userRequestHeaderField = task.getHeaderMapFields();
-        if (userRequestHeaderField != null) {
-            for (Map.Entry<String, List<String>> entry : userRequestHeaderField.entrySet()) {
-                String key = entry.getKey();
-                List<String> values = entry.getValue();
-                for (String value : values) {
-                    connection.addHeader(key, value);
-                }
-            }
+        final Map<String, List<String>> userHeader = task.getHeaderMapFields();
+        if (userHeader != null) Util.addUserRequestHeaderField(userHeader, connection);
+        if (userHeader == null || !userHeader.containsKey(USER_AGENT)) {
+            Util.addDefaultUserAgent(connection);
         }
 
         // add range header
@@ -67,28 +64,33 @@ public class HeaderInterceptor implements Interceptor.Connect {
         }
 
         String range = "bytes=" + blockInfo.getRangeLeft() + "-";
-        if (blockIndex > 0 && blockIndex < info.getBlockCount() - 1) {
-            range += blockInfo.getRangeRight();
-        }
+        range += blockInfo.getRangeRight();
 
-        connection.addHeader("Range", range);
+        connection.addHeader(RANGE, range);
+        Util.d(TAG, "AssembleHeaderRange (" + task.getId() + ") block(" + blockIndex + ") "
+                + "downloadFrom(" + blockInfo.getRangeLeft() + ") currentOffset("
+                + blockInfo.getCurrentOffset() + ")");
 
         // add etag if exist
         final String etag = info.getEtag();
         if (!Util.isEmpty(etag)) {
-            connection.addHeader("If-Match", etag);
+            connection.addHeader(IF_MATCH, etag);
         }
 
         if (chain.getCache().isInterrupt()) {
             throw InterruptException.SIGNAL;
         }
 
-        OkDownload.with().callbackDispatcher().dispatch().connectStart(task, blockIndex,
-                connection.getRequestProperties());
+        OkDownload.with().callbackDispatcher().dispatch()
+                .connectStart(task, blockIndex, connection.getRequestProperties());
+
         DownloadConnection.Connected connected = chain.processConnect();
 
+        Map<String, List<String>> responseHeaderFields = connected.getResponseHeaderFields();
+        if (responseHeaderFields == null) responseHeaderFields = new HashMap<>();
+
         OkDownload.with().callbackDispatcher().dispatch().connectEnd(task, blockIndex,
-                connected.getResponseCode(), connected.getResponseHeaderFields());
+                connected.getResponseCode(), responseHeaderFields);
         if (chain.getCache().isInterrupt()) {
             throw InterruptException.SIGNAL;
         }
@@ -99,72 +101,16 @@ public class HeaderInterceptor implements Interceptor.Connect {
                 strategy.resumeAvailableResponseCheck(connected, blockIndex, info);
         responseCheck.inspect();
 
-        final String contentDisposition = connected.getResponseHeaderField("Content-Disposition");
-        final String responseFilename = parseContentDisposition(contentDisposition);
-        strategy.validFilenameFromResponse(responseFilename, task, info, connected);
-        inspectFileConflictAfterRun(chain);
-
-        info.setEtag(etag);
-
-        // content-length
-        final String contentLengthStr = connected.getResponseHeaderField("Content-Length");
-        long contentLength;
-        if (Util.isEmpty(contentLengthStr)) contentLength = CHUNKED_CONTENT_LENGTH;
-        else contentLength = Long.parseLong(contentLengthStr);
-        if (contentLength < 0) {
-            // no content length
-            final String transferEncoding = connected.getResponseHeaderField("Transfer-Encoding");
-            final boolean isEncodingChunked =
-                    transferEncoding != null && transferEncoding.equals("chunked");
-            if (!isEncodingChunked) {
-                Util.w(TAG, "Transfer-Encoding isn't chunked but there is no "
-                        + "valid Content-Length either!");
-                if (contentLength != CHUNKED_CONTENT_LENGTH) {
-                    Util.w(TAG, "Content-Length[" + contentLength + " is not be "
-                            + "recognized, so we change to chunked mark.");
-                    contentLength = CHUNKED_CONTENT_LENGTH;
-                }
-            } else {
-                contentLength = CHUNKED_CONTENT_LENGTH;
-            }
+        final long contentLength;
+        final String contentLengthField = connected.getResponseHeaderField(CONTENT_LENGTH);
+        if (contentLengthField == null || contentLengthField.length() == 0) {
+            final String contentRangeField = connected.getResponseHeaderField(CONTENT_RANGE);
+            contentLength = Util.parseContentLengthFromContentRange(contentRangeField);
+        } else {
+            contentLength = Util.parseContentLength(contentLengthField);
         }
 
-        info.setChunked(contentLength == CHUNKED_CONTENT_LENGTH);
         chain.setResponseContentLength(contentLength);
         return connected;
     }
-
-    private void inspectFileConflictAfterRun(DownloadChain chain) throws IOException {
-        if (OkDownload.with().downloadDispatcher().isFileConflictAfterRun(chain.getTask())) {
-            throw FileBusyAfterRunException.SIGNAL;
-        }
-    }
-
-    private static final Pattern CONTENT_DISPOSITION_PATTERN =
-            Pattern.compile("attachment;\\s*filename\\s*=\\s*\"([^\"]*)\"");
-
-    /**
-     * The same to com.android.providers.downloads.Helpers#parseContentDisposition.
-     * </p>
-     * Parse the Content-Disposition HTTP Header. The format of the header
-     * is defined here: http://www.w3.org/Protocols/rfc2616/rfc2616-sec19.html
-     * This header provides a filename for content that is going to be
-     * downloaded to the file system. We only support the attachment type.
-     */
-    @Nullable static String parseContentDisposition(String contentDisposition) {
-        if (contentDisposition == null) {
-            return null;
-        }
-
-        try {
-            Matcher m = CONTENT_DISPOSITION_PATTERN.matcher(contentDisposition);
-            if (m.find()) {
-                return m.group(1);
-            }
-        } catch (IllegalStateException ex) {
-            // This function is defined as returning null when it can't parse the header
-        }
-        return null;
-    }
-
 }

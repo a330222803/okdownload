@@ -1,12 +1,9 @@
 package com.liulishuo.okdownload;
 
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
+import android.content.Context;
 
-import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointStoreOnCache;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
 import com.liulishuo.okdownload.core.connection.DownloadUrlConnection;
 import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
@@ -14,6 +11,11 @@ import com.liulishuo.okdownload.core.dispatcher.DownloadDispatcher;
 import com.liulishuo.okdownload.core.download.DownloadStrategy;
 import com.liulishuo.okdownload.core.file.DownloadOutputStream;
 import com.liulishuo.okdownload.core.file.ProcessFileStrategy;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 
 import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -55,7 +57,7 @@ public class OkDownloadTest {
     public void create_WithParam() {
         final DownloadDispatcher mockDownloadDispatcher = mock(DownloadDispatcher.class);
         final CallbackDispatcher mockCallbackDispatcher = mock(CallbackDispatcher.class);
-        final BreakpointStore mockBreakpointStore = mock(BreakpointStore.class);
+        final DownloadStore mockDownloadStore = mock(DownloadStore.class);
         final DownloadConnection.Factory mockConnectionFactory =
                 mock(DownloadConnection.Factory.class);
         final DownloadOutputStream.Factory mockOutputFactory =
@@ -68,7 +70,7 @@ public class OkDownloadTest {
                 new OkDownload.Builder(application)
                         .downloadDispatcher(mockDownloadDispatcher)
                         .callbackDispatcher(mockCallbackDispatcher)
-                        .breakpointStore(mockBreakpointStore)
+                        .downloadStore(mockDownloadStore)
                         .connectionFactory(mockConnectionFactory)
                         .outputStreamFactory(mockOutputFactory)
                         .processFileStrategy(mockProcessFileStrategy)
@@ -79,7 +81,7 @@ public class OkDownloadTest {
 
         assertThat(okDownload.downloadDispatcher()).isEqualTo(mockDownloadDispatcher);
         assertThat(okDownload.callbackDispatcher()).isEqualTo(mockCallbackDispatcher);
-        assertThat(okDownload.breakpointStore()).isEqualTo(mockBreakpointStore);
+        assertThat(okDownload.breakpointStore()).isEqualTo(mockDownloadStore);
         assertThat(okDownload.connectionFactory()).isEqualTo(mockConnectionFactory);
         assertThat(okDownload.outputStreamFactory()).isEqualTo(mockOutputFactory);
         assertThat(okDownload.processFileStrategy()).isEqualTo(mockProcessFileStrategy);
@@ -87,5 +89,19 @@ public class OkDownloadTest {
         assertThat(okDownload.monitor).isEqualTo(mockMonitor);
     }
 
+    @Test(expected = IllegalStateException.class)
+    public void with_noValidContext() {
+        OkDownloadProvider.context = null;
+        OkDownload.singleton = null;
 
+        OkDownload.with();
+    }
+
+    @Test
+    public void with_valid() {
+        OkDownloadProvider.context = mock(Context.class);
+        OkDownload.singleton = null;
+
+        assertThat(OkDownload.with()).isNotNull();
+    }
 }

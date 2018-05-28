@@ -16,6 +16,9 @@
 
 package com.liulishuo.okdownload.core.breakpoint;
 
+import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.core.cause.EndCause;
+
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -23,14 +26,17 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import java.io.File;
 import java.io.IOException;
-
-import com.liulishuo.okdownload.DownloadTask;
 
 import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -58,17 +64,26 @@ public class BreakpointStoreOnSqliteTest {
         store.close();
     }
 
+    private static int index = 0;
+
+    private static DownloadTask mockTask() {
+        DownloadTask task = mock(DownloadTask.class);
+        doReturn(mock(DownloadTask.MockTaskForCompare.class)).when(task).mock(anyInt());
+        when(task.getUrl()).thenReturn("https://jacksgong.com/" + index++);
+        return task;
+    }
+
     @Test
     public void get_createAndInsert_onSyncToFilesystemSuccess_update() throws IOException {
-        final int id1 = store.findOrCreateId(mock(DownloadTask.class));
-        final int id2 = store.findOrCreateId(mock(DownloadTask.class));
+        final int id1 = store.findOrCreateId(mockTask());
+        final int id2 = store.findOrCreateId(mockTask());
         assertThat(id1).isNotEqualTo(id2);
         verify(onCache, times(2)).findOrCreateId(any(DownloadTask.class));
 
         final DownloadTask task = mock(DownloadTask.class);
         when(task.getId()).thenReturn(id2);
         when(task.getUrl()).thenReturn("url");
-        when(task.getParentPath()).thenReturn("p-path");
+        when(task.getParentFile()).thenReturn(new File("p-path"));
         doReturn("filename").when(task).getFilename();
 
         store.createAndInsert(task);
@@ -85,23 +100,43 @@ public class BreakpointStoreOnSqliteTest {
         store.update(info2);
         verify(onCache).update(info2);
         verify(helper).updateInfo(info2);
+
+    }
+
+    @Test
+    public void update_updateFilename() throws IOException {
+        final BreakpointInfo info = mock(BreakpointInfo.class);
+        when(info.isTaskOnlyProvidedParentPath()).thenReturn(false);
+        when(info.getUrl()).thenReturn("url");
+        when(info.getFilename()).thenReturn("filename");
+
+        store.update(info);
+        verify(helper, never()).updateFilename(eq("url"), eq("filename"));
+
+        when(info.isTaskOnlyProvidedParentPath()).thenReturn(true);
+        store.update(info);
+        verify(helper).updateFilename(eq("url"), eq("filename"));
     }
 
     @Test
     public void completeDownload() {
         final int id = store.findOrCreateId(mock(DownloadTask.class));
-        store.completeDownload(id);
-        verify(onCache).completeDownload(id);
+        store.onTaskEnd(id, EndCause.COMPLETED, null);
+        verify(onCache).onTaskEnd(eq(id), eq(EndCause.COMPLETED), nullable(Exception.class));
         verify(helper).removeInfo(id);
     }
-
 
     @Test
     public void discard() {
         final int id = store.findOrCreateId(mock(DownloadTask.class));
 
-        store.discard(id);
-        verify(onCache).discard(id);
+        store.remove(id);
+        verify(onCache).remove(id);
         verify(helper).removeInfo(id);
+    }
+
+    @Test
+    public void getAfterCompleted() {
+        assertThat(store.getAfterCompleted(1)).isNull();
     }
 }

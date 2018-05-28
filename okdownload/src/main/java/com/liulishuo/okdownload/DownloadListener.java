@@ -16,6 +16,7 @@
 
 package com.liulishuo.okdownload;
 
+import android.support.annotation.IntRange;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
@@ -34,27 +35,59 @@ import java.util.Map;
  * @see com.liulishuo.okdownload.core.listener.DownloadListener4WithSpeed
  */
 public interface DownloadListener {
-    void taskStart(DownloadTask task);
+    void taskStart(@NonNull DownloadTask task);
 
-    void downloadFromBeginning(DownloadTask task, BreakpointInfo info, ResumeFailedCause cause);
+    /**
+     * On start trial connect state.
+     * <p/>
+     * The trial connection is used for:
+     * 1. check whether the local info is valid to resume downloading
+     * 2. get the instance length of this resource.
+     * 3. check whether the resource support accept range.
+     *
+     * @param task                the host task.
+     * @param requestHeaderFields the request header fields for this connection.
+     */
+    void connectTrialStart(@NonNull DownloadTask task,
+                           @NonNull Map<String, List<String>> requestHeaderFields);
 
-    void downloadFromBreakpoint(DownloadTask task, BreakpointInfo info);
+    /**
+     * On end trial connect state.
+     * <p/>
+     * The trial connection is used for:
+     * 1. check whether the local info is valid to resume downloading
+     * 2. get the instance length of this resource.
+     * 3. check whether the resource support accept range.
+     *
+     * @param task                 the host task.
+     * @param responseCode         the response code of this trial connection.
+     * @param responseHeaderFields the response header fields for this trial connection.
+     */
+    void connectTrialEnd(@NonNull DownloadTask task,
+                         int responseCode,
+                         @NonNull Map<String, List<String>> responseHeaderFields);
 
-    void connectStart(DownloadTask task, int blockIndex,
+    void downloadFromBeginning(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                               @NonNull ResumeFailedCause cause);
+
+    void downloadFromBreakpoint(@NonNull DownloadTask task, @NonNull BreakpointInfo info);
+
+    void connectStart(@NonNull DownloadTask task, @IntRange(from = 0) int blockIndex,
                       @NonNull Map<String, List<String>> requestHeaderFields);
 
-    void connectEnd(DownloadTask task, int blockIndex, int responseCode,
+    void connectEnd(@NonNull DownloadTask task, @IntRange(from = 0) int blockIndex,
+                    int responseCode,
                     @NonNull Map<String, List<String>> responseHeaderFields);
 
-    void splitBlockEnd(DownloadTask task, BreakpointInfo info);
+    void fetchStart(@NonNull DownloadTask task, @IntRange(from = 0) int blockIndex,
+                    @IntRange(from = 0) long contentLength);
 
-    void fetchStart(DownloadTask task, int blockIndex, long contentLength);
+    void fetchProgress(@NonNull DownloadTask task, @IntRange(from = 0) int blockIndex,
+                       @IntRange(from = 0) long increaseBytes);
 
-    void fetchProgress(DownloadTask task, int blockIndex, long increaseBytes);
+    void fetchEnd(@NonNull DownloadTask task, @IntRange(from = 0) int blockIndex,
+                  @IntRange(from = 0) long contentLength);
 
-    void fetchEnd(DownloadTask task, int blockIndex, long contentLength);
-
-    void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause);
+    void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                 @Nullable Exception realCause);
 }
-
-

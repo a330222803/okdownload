@@ -16,31 +16,41 @@
 
 package com.liulishuo.okdownload.core.download;
 
+import android.Manifest;
+import android.content.Context;
+import android.net.ConnectivityManager;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
-
-import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.OkDownload;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
+import com.liulishuo.okdownload.core.breakpoint.BreakpointStore;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
+import com.liulishuo.okdownload.core.exception.NetworkPolicyException;
 import com.liulishuo.okdownload.core.exception.ResumeFailedException;
-import com.liulishuo.okdownload.core.exception.ServerCancelledException;
+import com.liulishuo.okdownload.core.exception.ServerCanceledException;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.UnknownHostException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static com.liulishuo.okdownload.core.Util.ETAG;
 import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.RESPONSE_CREATED_RANGE_NOT_FROM_0;
 import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.RESPONSE_ETAG_CHANGED;
 import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.RESPONSE_PRECONDITION_FAILED;
 import static com.liulishuo.okdownload.core.cause.ResumeFailedCause.RESPONSE_RESET_RANGE_NOT_FROM_0;
-import static com.liulishuo.okdownload.core.download.DownloadChain.CHUNKED_CONTENT_LENGTH;
 
 public class DownloadStrategy {
+
+    private static final String TAG = "DownloadStrategy";
 
     // 1 connection: [0, 1MB)
     private static final long ONE_CONNECTION_UPPER_LIMIT = 1024 * 1024; // 1MiB
@@ -58,8 +68,9 @@ public class DownloadStrategy {
         return new ResumeAvailableResponseCheck(connected, blockIndex, info);
     }
 
-    public int determineBlockCount(@NonNull DownloadTask task, long totalLength,
-                                   @NonNull DownloadConnection.Connected connected) {
+    public int determineBlockCount(@NonNull DownloadTask task, long totalLength) {
+        if (task.getSetConnectionCount() != null) return task.getSetConnectionCount();
+
         if (totalLength < ONE_CONNECTION_UPPER_LIMIT) {
             return 1;
         }
@@ -79,32 +90,57 @@ public class DownloadStrategy {
         return 5;
     }
 
-    public long reconnectFirstBlockThresholdBytes() {
-        return 5120;
-    }
-
     public long reuseIdledSameInfoThresholdBytes() {
         return 10240;
     }
 
-    public boolean isSplitBlock(final long contentLength,
-                                @NonNull DownloadConnection.Connected connected) throws
-            IOException {
-        // chunked
-        if (contentLength == CHUNKED_CONTENT_LENGTH) return false;
+    // this case meet only if there are another info task is idle and is the same after
+    // this task has filename.
+    public boolean inspectAnotherSameInfo(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                                          long instanceLength) {
+        if (!task.isFilenameFromResponse()) return false;
+
+        final BreakpointStore store = OkDownload.with().breakpointStore();
+        final BreakpointInfo anotherInfo = store.findAnotherInfoFromCompare(task, info);
+        if (anotherInfo == null) return false;
+
+        store.remove(anotherInfo.getId());
+
+        if (anotherInfo.getTotalOffset()
+                <= OkDownload.with().downloadStrategy().reuseIdledSameInfoThresholdBytes()) {
+            return false;
+        }
+
+        if (anotherInfo.getEtag() != null && !anotherInfo.getEtag().equals(info.getEtag())) {
+            return false;
+        }
+
+        if (anotherInfo.getTotalLength() != instanceLength) {
+            return false;
+        }
+
+        if (anotherInfo.getFile() == null || !anotherInfo.getFile().exists()) return false;
+
+        info.reuseBlocks(anotherInfo);
+
+        Util.d(TAG, "Reuse another same info: " + info);
+        return true;
+    }
+
+    public boolean isUseMultiBlock(final boolean isAcceptRange) {
 
         // output stream not support seek
         if (!OkDownload.with().outputStreamFactory().supportSeek()) return false;
 
-        // partial, support range
-        return connected.getResponseCode() == HttpURLConnection.HTTP_PARTIAL;
+        //  support range
+        return isAcceptRange;
     }
 
     private static final Pattern TMP_FILE_NAME_PATTERN = Pattern
             .compile(".*\\\\|/([^\\\\|/|?]*)\\??");
 
-    public void validFilenameFromResume(@NonNull String filenameOnStore,
-                                        @NonNull DownloadTask task) {
+    public void inspectFilenameFromResume(@NonNull String filenameOnStore,
+                                          @NonNull DownloadTask task) {
         final String filename = task.getFilename();
         if (Util.isEmpty(filename)) {
             task.getFilenameHolder().set(filenameOnStore);
@@ -113,11 +149,9 @@ public class DownloadStrategy {
 
     public void validFilenameFromResponse(@Nullable String responseFileName,
                                           @NonNull DownloadTask task,
-                                          @NonNull BreakpointInfo info,
-                                          @NonNull DownloadConnection.Connected connected) throws
-            IOException {
+                                          @NonNull BreakpointInfo info) throws IOException {
         if (Util.isEmpty(task.getFilename())) {
-            final String filename = determineFilename(responseFileName, task, connected);
+            final String filename = determineFilename(responseFileName, task);
 
             // Double check avoid changed by other block.
             if (Util.isEmpty(task.getFilename())) {
@@ -133,9 +167,7 @@ public class DownloadStrategy {
     }
 
     protected String determineFilename(@Nullable String responseFileName,
-                                       @NonNull DownloadTask task,
-                                       @NonNull DownloadConnection.Connected connected) throws
-            IOException {
+                                       @NonNull DownloadTask task) throws IOException {
 
         if (Util.isEmpty(responseFileName)) {
 
@@ -160,13 +192,55 @@ public class DownloadStrategy {
         return responseFileName;
     }
 
+    /**
+     * @return {@code true} success valid filename from store.
+     */
+    public boolean validFilenameFromStore(@NonNull DownloadTask task) {
+        final String filename = OkDownload.with().breakpointStore()
+                .getResponseFilename(task.getUrl());
+        if (filename == null) return false;
+
+        task.getFilenameHolder().set(filename);
+        return true;
+    }
+
+    /**
+     * Valid info for {@code task} on completed state.
+     */
+    public void validInfoOnCompleted(@NonNull DownloadTask task, @NonNull DownloadStore store) {
+        BreakpointInfo info = store.getAfterCompleted(task.getId());
+        if (info == null) {
+            info = new BreakpointInfo(task.getId(), task.getUrl(), task.getParentFile(),
+                    task.getFilename());
+            final long size;
+            if (Util.isUriContentScheme(task.getUri())) {
+                size = Util.getSizeFromContentUri(task.getUri());
+            } else {
+                final File file = task.getFile();
+                if (file == null) {
+                    size = 0;
+                    Util.w(TAG, "file is not ready on valid info for task on complete state "
+                            + task);
+                } else {
+                    size = file.length();
+                }
+            }
+            info.addBlock(new BlockInfo(0, size, size));
+        }
+        DownloadTask.TaskHideWrapper.setBreakpointInfo(task, info);
+    }
+
     public static class FilenameHolder {
         private volatile String filename;
+        private final boolean filenameProvidedByConstruct;
 
-        public FilenameHolder() { }
+        public FilenameHolder() {
+            this.filenameProvidedByConstruct = false;
+        }
 
         public FilenameHolder(@NonNull String filename) {
             this.filename = filename;
+            this.filenameProvidedByConstruct = true;
         }
 
         void set(@NonNull String filename) {
@@ -175,12 +249,19 @@ public class DownloadStrategy {
 
         @Nullable public String get() { return filename; }
 
+        public boolean isFilenameProvidedByConstruct() {
+            return filenameProvidedByConstruct;
+        }
+
         @Override public boolean equals(Object obj) {
             if (super.equals(obj)) return true;
 
             if (obj instanceof FilenameHolder) {
-                if (filename == null) return ((FilenameHolder) obj).filename == null;
-                else return filename.equals(((FilenameHolder) obj).filename);
+                if (filename == null) {
+                    return ((FilenameHolder) obj).filename == null;
+                } else {
+                    return filename.equals(((FilenameHolder) obj).filename);
+                }
             }
 
             return false;
@@ -205,62 +286,116 @@ public class DownloadStrategy {
 
         public void inspect() throws IOException {
             final BlockInfo blockInfo = info.getBlock(blockIndex);
-            boolean isServerCancelled = false;
-            ResumeFailedCause resumeFailedCause = null;
-
             final int code = connected.getResponseCode();
-            final String etag = info.getEtag();
-            final String newEtag = connected.getResponseHeaderField("Etag");
+            final String newEtag = connected.getResponseHeaderField(ETAG);
 
-            do {
-                if (code == HttpURLConnection.HTTP_PRECON_FAILED) {
-                    resumeFailedCause = RESPONSE_PRECONDITION_FAILED;
-                    break;
-                }
-
-                if (!Util.isEmpty(etag) && !Util.isEmpty(newEtag) && !newEtag.equals(etag)) {
-                    // etag changed.
-                    // also etag changed is relate to HTTP_PRECON_FAILED
-                    resumeFailedCause = RESPONSE_ETAG_CHANGED;
-                    break;
-                }
-
-                if (code == HttpURLConnection.HTTP_CREATED && blockInfo.getCurrentOffset() != 0) {
-                    // The request has been fulfilled and has resulted in one or more new resources
-                    // being created.
-                    // mark this case is precondition failed for
-                    // 1. checkout whether accept partial
-                    // 2. 201 means new resources so range must be from beginning otherwise it can't
-                    // match local range.
-                    resumeFailedCause = RESPONSE_CREATED_RANGE_NOT_FROM_0;
-                    break;
-                }
-
-                if (code == HttpURLConnection.HTTP_RESET && blockInfo.getCurrentOffset() != 0) {
-                    resumeFailedCause = RESPONSE_RESET_RANGE_NOT_FROM_0;
-                    break;
-                }
-
-                if (code != HttpURLConnection.HTTP_PARTIAL && code != HttpURLConnection.HTTP_OK) {
-                    isServerCancelled = true;
-                    break;
-                }
-
-                if (code == HttpURLConnection.HTTP_OK && blockInfo.getCurrentOffset() != 0) {
-                    isServerCancelled = true;
-                    break;
-                }
-            } while (false);
-
+            final ResumeFailedCause resumeFailedCause = OkDownload.with().downloadStrategy()
+                    .getPreconditionFailedCause(code, blockInfo.getCurrentOffset() != 0,
+                            info, newEtag);
             if (resumeFailedCause != null) {
                 // resume failed, relaunch from beginning.
                 throw new ResumeFailedException(resumeFailedCause);
             }
 
+            final boolean isServerCancelled = OkDownload.with().downloadStrategy()
+                    .isServerCanceled(code, blockInfo.getCurrentOffset() != 0);
             if (isServerCancelled) {
                 // server cancelled, end task.
-                throw new ServerCancelledException(code, blockInfo.getCurrentOffset());
+                throw new ServerCanceledException(code, blockInfo.getCurrentOffset());
             }
+        }
+    }
+
+    @Nullable public ResumeFailedCause getPreconditionFailedCause(int responseCode,
+                                                                  boolean isAlreadyProceed,
+                                                                  @NonNull BreakpointInfo info,
+                                                                  @Nullable String responseEtag) {
+        final String localEtag = info.getEtag();
+        if (responseCode == HttpURLConnection.HTTP_PRECON_FAILED) {
+            return RESPONSE_PRECONDITION_FAILED;
+        }
+
+        if (!Util.isEmpty(localEtag) && !Util.isEmpty(responseEtag) && !responseEtag
+                .equals(localEtag)) {
+            // etag changed.
+            // also etag changed is relate to HTTP_PRECON_FAILED
+            return RESPONSE_ETAG_CHANGED;
+        }
+
+        if (responseCode == HttpURLConnection.HTTP_CREATED && isAlreadyProceed) {
+            // The request has been fulfilled and has resulted in one or more new resources
+            // being created.
+            // mark this case is precondition failed for
+            // 1. checkout whether accept partial
+            // 2. 201 means new resources so range must be from beginning otherwise it can't
+            // match local range.
+            return RESPONSE_CREATED_RANGE_NOT_FROM_0;
+        }
+
+        if (responseCode == HttpURLConnection.HTTP_RESET && isAlreadyProceed) {
+            return RESPONSE_RESET_RANGE_NOT_FROM_0;
+        }
+
+        return null;
+    }
+
+    public boolean isServerCanceled(int responseCode, boolean isAlreadyProceed) {
+        if (responseCode != HttpURLConnection.HTTP_PARTIAL
+                && responseCode != HttpURLConnection.HTTP_OK) {
+            return true;
+        }
+
+        if (responseCode == HttpURLConnection.HTTP_OK && isAlreadyProceed) {
+            return true;
+        }
+
+        return false;
+    }
+
+    Boolean isHasAccessNetworkStatePermission = null;
+    private ConnectivityManager manager = null;
+
+    public void inspectNetworkAvailable() throws UnknownHostException {
+        if (isHasAccessNetworkStatePermission == null) {
+            isHasAccessNetworkStatePermission = Util
+                    .checkPermission(Manifest.permission.ACCESS_NETWORK_STATE);
+        }
+
+        // no permission will not check network available case.
+        if (!isHasAccessNetworkStatePermission) return;
+
+        if (manager == null) {
+            manager = (ConnectivityManager) OkDownload.with().context()
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
+        }
+
+        if (!Util.isNetworkAvailable(manager)) {
+            throw new UnknownHostException("network is not available!");
+        }
+    }
+
+    public void inspectNetworkOnWifi(@NonNull DownloadTask task) throws IOException {
+        if (isHasAccessNetworkStatePermission == null) {
+            isHasAccessNetworkStatePermission = Util
+                    .checkPermission(Manifest.permission.ACCESS_NETWORK_STATE);
+        }
+
+        if (!task.isWifiRequired()) return;
+
+        if (!isHasAccessNetworkStatePermission) {
+            throw new IOException("required for access network state but don't have the "
+                    + "permission of Manifest.permission.ACCESS_NETWORK_STATE, please declare this "
+                    + "permission first on your AndroidManifest, so we can handle the case of "
+                    + "downloading required wifi state.");
+        }
+
+        if (manager == null) {
+            manager = (ConnectivityManager) OkDownload.with().context()
+                    .getSystemService(Context.CONNECTIVITY_SERVICE);
+        }
+
+        if (Util.isNetworkNotOnWifiType(manager)) {
+            throw new NetworkPolicyException();
         }
     }
 }

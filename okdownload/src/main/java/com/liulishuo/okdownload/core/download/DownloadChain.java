@@ -19,20 +19,11 @@ package com.liulishuo.okdownload.core.download;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.locks.LockSupport;
-
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.OkDownload;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
+import com.liulishuo.okdownload.core.breakpoint.DownloadStore;
 import com.liulishuo.okdownload.core.connection.DownloadConnection;
 import com.liulishuo.okdownload.core.dispatcher.CallbackDispatcher;
 import com.liulishuo.okdownload.core.exception.InterruptException;
@@ -45,20 +36,28 @@ import com.liulishuo.okdownload.core.interceptor.connect.CallServerInterceptor;
 import com.liulishuo.okdownload.core.interceptor.connect.HeaderInterceptor;
 import com.liulishuo.okdownload.core.interceptor.connect.RedirectInterceptor;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 public class DownloadChain implements Runnable {
 
     private static final ExecutorService EXECUTOR = new ThreadPoolExecutor(0, Integer.MAX_VALUE,
             60, TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
             Util.threadFactory("OkDownload Cancel Block", false));
 
-    public static final int CHUNKED_CONTENT_LENGTH = -1;
+    private static final String TAG = "DownloadChain";
 
     private final int blockIndex;
 
     @NonNull private final DownloadTask task;
     @NonNull private final BreakpointInfo info;
     @NonNull private final DownloadCache cache;
-    @Nullable private Thread parkThread;
 
     final List<Interceptor.Connect> connectInterceptorList = new ArrayList<>();
     final List<Interceptor.Fetch> fetchInterceptorList = new ArrayList<>();
@@ -66,57 +65,44 @@ public class DownloadChain implements Runnable {
     int fetchIndex = 0;
 
     private long responseContentLength;
-    private DownloadConnection connection;
+    private volatile DownloadConnection connection;
 
     long noCallbackIncreaseBytes;
-    private volatile Thread currentThread;
+    volatile Thread currentThread;
 
     private final CallbackDispatcher callbackDispatcher;
 
+    @NonNull private final DownloadStore store;
+
     static DownloadChain createChain(int blockIndex, DownloadTask task,
                                      @NonNull BreakpointInfo info,
-                                     DownloadCache cache) {
-        return new DownloadChain(blockIndex, task, info, cache);
+                                     @NonNull DownloadCache cache,
+                                     @NonNull DownloadStore store) {
+        return new DownloadChain(blockIndex, task, info, cache, store);
     }
 
-    static DownloadChain createFirstBlockChain(Thread parkThread, DownloadTask task,
-                                               @NonNull BreakpointInfo info,
-                                               DownloadCache cache) {
-        final DownloadChain chain = new DownloadChain(0, task, info, cache);
-        chain.parkThread = parkThread;
-
-        return chain;
-    }
-
-    private DownloadChain(int blockIndex, DownloadTask task, @NonNull BreakpointInfo info,
-                          DownloadCache cache) {
+    private DownloadChain(int blockIndex, @NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                          @NonNull DownloadCache cache, @NonNull DownloadStore store) {
         this.blockIndex = blockIndex;
         this.task = task;
         this.cache = cache;
         this.info = info;
+        this.store = store;
         this.callbackDispatcher = OkDownload.with().callbackDispatcher();
+    }
+
+    public long getResponseContentLength() {
+        return responseContentLength;
+    }
+
+    public void setResponseContentLength(long responseContentLength) {
+        this.responseContentLength = responseContentLength;
     }
 
     public void cancel() {
         if (finished.get() || this.currentThread == null) return;
 
-        if (fetchIndex >= fetchInterceptorList.size() - 1) {
-            // on the fetch looper.
-            getOutputStream().ensureSyncComplete(blockIndex);
-        }
-
         currentThread.interrupt();
-
-        EXECUTOR.execute(cancelRunnable);
-    }
-
-    public boolean isOtherBlockPark() {
-        return parkThread != null;
-    }
-
-    public void unparkOtherBlock() {
-        LockSupport.unpark(parkThread);
-        parkThread = null;
     }
 
     @NonNull public DownloadTask getTask() {
@@ -131,7 +117,7 @@ public class DownloadChain implements Runnable {
         return blockIndex;
     }
 
-    public void setConnection(@NonNull DownloadConnection connection) {
+    public synchronized void setConnection(@NonNull DownloadConnection connection) {
         this.connection = connection;
     }
 
@@ -147,11 +133,11 @@ public class DownloadChain implements Runnable {
         return this.cache.getOutputStream();
     }
 
-    @Nullable public DownloadConnection getConnection() {
+    @Nullable public synchronized DownloadConnection getConnection() {
         return this.connection;
     }
 
-    @NonNull public DownloadConnection getConnectionOrCreate() throws IOException {
+    @NonNull public synchronized DownloadConnection getConnectionOrCreate() throws IOException {
         if (cache.isInterrupt()) throw InterruptException.SIGNAL;
 
         if (connection == null) {
@@ -210,18 +196,17 @@ public class DownloadChain implements Runnable {
         dispatcher.dispatch().fetchEnd(task, blockIndex, totalFetchedBytes);
     }
 
-    public void setResponseContentLength(long responseContentLength) {
-        this.responseContentLength = responseContentLength;
-    }
-
-    public long getResponseContentLength() {
-        return responseContentLength;
-    }
-
-
     public void resetConnectForRetry() {
         connectIndex = 1;
-        if (connection != null) connection.release();
+        releaseConnection();
+    }
+
+    public synchronized void releaseConnection() {
+        if (connection != null) {
+            connection.release();
+            Util.d(TAG, "release connection " + connection + " task[" + task.getId()
+                    + "] block[" + blockIndex + "]");
+        }
         connection = null;
     }
 
@@ -243,9 +228,13 @@ public class DownloadChain implements Runnable {
         return processFetch();
     }
 
-    private AtomicBoolean finished = new AtomicBoolean(false);
+    final AtomicBoolean finished = new AtomicBoolean(false);
 
     boolean isFinished() { return finished.get(); }
+
+    @NonNull public DownloadStore getDownloadStore() {
+        return store;
+    }
 
     @Override
     public void run() {
@@ -260,20 +249,17 @@ public class DownloadChain implements Runnable {
             // interrupt.
         } finally {
             finished.set(true);
-            if (isOtherBlockPark()) {
-                unparkOtherBlock();
-            }
+            releaseConnectionAsync();
         }
     }
 
-    private final Runnable cancelRunnable = new Runnable() {
-        @Override public void run() {
-            if (finished.get() || currentThread == null) return;
+    void releaseConnectionAsync() {
+        EXECUTOR.execute(releaseConnectionRunnable);
+    }
 
-            final DownloadConnection connection = getConnection();
-            if (connection != null) {
-                connection.release();
-            }
+    private final Runnable releaseConnectionRunnable = new Runnable() {
+        @Override public void run() {
+            releaseConnection();
         }
     };
 }

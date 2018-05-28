@@ -18,14 +18,18 @@ package com.liulishuo.okdownload.core.listener;
 
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
-import android.util.SparseArray;
 
 import com.liulishuo.okdownload.DownloadListener;
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
-import com.liulishuo.okdownload.core.listener.assist.DownloadListener4Assist;
+import com.liulishuo.okdownload.core.listener.assist.Listener4Assist;
+import com.liulishuo.okdownload.core.listener.assist.ListenerAssist;
+import com.liulishuo.okdownload.core.listener.assist.ListenerModelHandler;
+
+import java.util.List;
+import java.util.Map;
 
 /**
  * When download from resume:
@@ -43,77 +47,79 @@ import com.liulishuo.okdownload.core.listener.assist.DownloadListener4Assist;
  * ->blockEnd->taskEnd
  */
 public abstract class DownloadListener4 implements DownloadListener,
-        DownloadListener4Assist.Listener4Callback {
+        Listener4Assist.Listener4Callback, ListenerAssist {
 
-    final DownloadListener4Assist assist;
+    final Listener4Assist assist;
 
-    DownloadListener4(DownloadListener4Assist assist) {
+    DownloadListener4(Listener4Assist assist) {
         this.assist = assist;
         assist.setCallback(this);
     }
 
     public DownloadListener4() {
-        this(new DownloadListener4Assist());
+        this(new Listener4Assist<>(new Listener4ModelCreator()));
     }
 
-    @Nullable
-    protected SparseArray<Long> blockCurrentOffsetMap(int id) {
-        final DownloadListener4Assist.Listener4Model model = assist.findModel(id);
-        return model == null ? null : model.getBlockCurrentOffsetMap();
+    public void setAssistExtend(@NonNull Listener4Assist.AssistExtend assistExtend) {
+        this.assist.setAssistExtend(assistExtend);
     }
 
-    /**
-     * If you only have one task attach to this listener instance, you can use this method without
-     * provide task id, otherwise please use {@link #blockCurrentOffsetMap(int)} instead.
-     */
-    @Nullable protected SparseArray<Long> blockCurrentOffsetMap() {
-        final DownloadListener4Assist.Listener4Model model = assist.getSingleTaskModel();
-        return model == null ? null : model.getBlockCurrentOffsetMap();
+    @Override public boolean isAlwaysRecoverAssistModel() {
+        return assist.isAlwaysRecoverAssistModel();
     }
 
-    protected long getCurrentOffset(int id) {
-        final DownloadListener4Assist.Listener4Model model = assist.findModel(id);
-        return model == null ? 0 : model.getCurrentOffset();
+    @Override public void setAlwaysRecoverAssistModel(boolean isAlwaysRecoverAssistModel) {
+        assist.setAlwaysRecoverAssistModel(isAlwaysRecoverAssistModel);
     }
 
-    /**
-     * If you only have one task attach to this listener instance, you can use this method without
-     * provide task id, otherwise please use {@link #getCurrentOffset(int)} instead.
-     */
-    protected long getCurrentOffset() {
-        final DownloadListener4Assist.Listener4Model model = assist.getSingleTaskModel();
-        return model == null ? 0 : model.getCurrentOffset();
+    @Override public void setAlwaysRecoverAssistModelIfNotSet(boolean isAlwaysRecoverAssistModel) {
+        assist.setAlwaysRecoverAssistModelIfNotSet(isAlwaysRecoverAssistModel);
     }
 
-    @Override public void downloadFromBeginning(DownloadTask task, BreakpointInfo info,
-                                                ResumeFailedCause cause) { }
-
-    @Override public final void downloadFromBreakpoint(DownloadTask task, BreakpointInfo info) {
-        initData(task, info, true);
+    @Override
+    public void connectTrialStart(@NonNull DownloadTask task,
+                                  @NonNull Map<String, List<String>> requestHeaderFields) {
     }
 
-    @Override public final void splitBlockEnd(DownloadTask task, BreakpointInfo info) {
-        initData(task, info, false);
+    @Override public void connectTrialEnd(@NonNull DownloadTask task, int responseCode,
+                                          @NonNull Map<String, List<String>> responseHeaderFields) {
     }
 
-    @Override public void fetchStart(DownloadTask task, int blockIndex, long contentLength) {
+    @Override public final void downloadFromBeginning(@NonNull DownloadTask task,
+                                                      @NonNull BreakpointInfo info,
+                                                      @NonNull ResumeFailedCause cause) {
+        assist.infoReady(task, info, false);
     }
 
-    @Override public void fetchProgress(DownloadTask task, int blockIndex, long increaseBytes) {
+    @Override public final void downloadFromBreakpoint(@NonNull DownloadTask task,
+                                                       @NonNull BreakpointInfo info) {
+        assist.infoReady(task, info, true);
+    }
+
+    @Override
+    public void fetchStart(@NonNull DownloadTask task, int blockIndex, long contentLength) {
+    }
+
+    @Override
+    public final void fetchProgress(@NonNull DownloadTask task, int blockIndex,
+                                    long increaseBytes) {
         assist.fetchProgress(task, blockIndex, increaseBytes);
     }
 
-    @Override public void fetchEnd(DownloadTask task, int blockIndex, long contentLength) {
+    @Override public void fetchEnd(@NonNull DownloadTask task, int blockIndex, long contentLength) {
         assist.fetchEnd(task, blockIndex);
     }
 
     @Override
-    public void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause) {
-        assist.taskEnd(task.getId());
+    public final void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                              @Nullable Exception realCause) {
+        assist.taskEnd(task, cause, realCause);
     }
 
-    protected void initData(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
-                            boolean fromBreakpoint) {
-        assist.initData(task, info, fromBreakpoint);
+    static class Listener4ModelCreator implements
+            ListenerModelHandler.ModelCreator<Listener4Assist.Listener4Model> {
+        @Override public Listener4Assist.Listener4Model create(int id) {
+            return new Listener4Assist.Listener4Model(id);
+        }
     }
 }

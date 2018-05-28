@@ -24,19 +24,27 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.SpeedCalculator;
 import com.liulishuo.okdownload.StatusUtil;
 import com.liulishuo.okdownload.core.Util;
 import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.listener.DownloadListener4WithSpeed;
+import com.liulishuo.okdownload.core.listener.assist.Listener4SpeedAssistExtend;
 import com.liulishuo.okdownload.sample.base.BaseSampleActivity;
 import com.liulishuo.okdownload.sample.util.DemoUtil;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * On this demo you can see the simplest way to download a task.
@@ -74,12 +82,24 @@ public class SingleActivity extends BaseSampleActivity {
 
     private void initTask() {
         final String filename = "single-test";
-        final int progressIntervalMillis = 16;
-        task = DemoUtil.createTask(this, filename, progressIntervalMillis);
+        final String url =
+                "https://cdn.llscdn.com/yy/files/xs8qmxn8-lls-LLS-5.8-800-20171207-111607.apk";
+        final File parentFile = DemoUtil.getParentFile(this);
+        task = new DownloadTask.Builder(url, parentFile)
+                .setFilename(filename)
+                // the minimal interval millisecond for callback progress
+                .setMinIntervalMillisCallbackProcess(16)
+                // ignore the same task has already completed in the past.
+                .setPassIfAlreadyCompleted(false)
+                .build();
     }
 
     private void initStatus(TextView statusTv, ProgressBar progressBar) {
         final StatusUtil.Status status = StatusUtil.getStatus(task);
+        if (status == StatusUtil.Status.COMPLETED) {
+            progressBar.setProgress(progressBar.getMax());
+        }
+
         statusTv.setText(status.toString());
         final BreakpointInfo info = StatusUtil.getCurrentInfo(task);
         if (info != null) {
@@ -118,26 +138,14 @@ public class SingleActivity extends BaseSampleActivity {
             private long totalLength;
             private String readableTotalLength;
 
-            @Override public void taskStart(DownloadTask task) {
-                super.taskStart(task);
-
+            @Override public void taskStart(@NonNull DownloadTask task) {
                 statusTv.setText(R.string.task_start);
             }
 
             @Override
-            protected void taskEnd(DownloadTask task, EndCause cause,
-                                   @android.support.annotation.Nullable Exception realCause,
-                                   @NonNull String averageSpeed) {
-                final String statusWithSpeed = cause.toString() + " " + averageSpeed;
-                statusTv.setText(statusWithSpeed);
-
-                actionTv.setText(R.string.start);
-                // mark
-                task.setTag(null);
-            }
-
-            @Override public void infoReady(DownloadTask task, @NonNull BreakpointInfo info,
-                                               boolean fromBreakpoint) {
+            public void infoReady(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                                  boolean fromBreakpoint,
+                                  @NonNull Listener4SpeedAssistExtend.Listener4SpeedModel model) {
                 statusTv.setText(R.string.info_ready);
 
                 totalLength = info.getTotalLength();
@@ -145,38 +153,97 @@ public class SingleActivity extends BaseSampleActivity {
                 DemoUtil.calcProgressToView(progressBar, info.getTotalOffset(), totalLength);
             }
 
-            @Override
-            public void progressBlock(DownloadTask task, int blockIndex,
-                                         long currentBlockOffset) {
+            @Override public void connectStart(@NonNull DownloadTask task, int blockIndex,
+                                               @NonNull Map<String, List<String>> requestHeaders) {
+                final String status = "Connect Start " + blockIndex;
+                statusTv.setText(status);
             }
 
-            @Override public void progress(DownloadTask task, long currentOffset) {
+            @Override
+            public void connectEnd(@NonNull DownloadTask task, int blockIndex, int responseCode,
+                                   @NonNull Map<String, List<String>> responseHeaders) {
+                final String status = "Connect End " + blockIndex;
+                statusTv.setText(status);
+            }
+
+            @Override
+            public void progressBlock(@NonNull DownloadTask task, int blockIndex,
+                                      long currentBlockOffset,
+                                      @NonNull SpeedCalculator blockSpeed) {
+            }
+
+            @Override public void progress(@NonNull DownloadTask task, long currentOffset,
+                                           @NonNull SpeedCalculator taskSpeed) {
                 final String readableOffset = Util.humanReadableBytes(currentOffset, true);
                 final String progressStatus = readableOffset + "/" + readableTotalLength;
-                final String speed = taskSpeed().speed();
+                final String speed = taskSpeed.speed();
                 final String progressStatusWithSpeed = progressStatus + "(" + speed + ")";
 
                 statusTv.setText(progressStatusWithSpeed);
                 DemoUtil.calcProgressToView(progressBar, currentOffset, totalLength);
             }
 
-            @Override public void blockEnd(DownloadTask task, int blockIndex, BlockInfo info) {
+            @Override
+            public void blockEnd(@NonNull DownloadTask task, int blockIndex, BlockInfo info,
+                                 @NonNull SpeedCalculator blockSpeed) {
             }
 
+            @Override public void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                                          @Nullable Exception realCause,
+                                          @NonNull SpeedCalculator taskSpeed) {
+                final String statusWithSpeed = cause.toString() + " " + taskSpeed.averageSpeed();
+                statusTv.setText(statusWithSpeed);
 
-            @Override public void connectStart(DownloadTask task, int blockIndex,
-                                               @NonNull Map<String, List<String>> requestHeaders) {
-                final String status = "Connect Start " + blockIndex;
-                statusTv.setText(status);
-            }
-
-            @Override public void connectEnd(DownloadTask task, int blockIndex, int responseCode,
-                                             @NonNull Map<String, List<String>> responseHeaders) {
-                final String status = "Connect End " + blockIndex;
-                statusTv.setText(status);
+                actionTv.setText(R.string.start);
+                // mark
+                task.setTag(null);
+                if (cause == EndCause.COMPLETED) {
+                    final String realMd5 = fileToMD5(task.getFile().getAbsolutePath());
+                    if (!realMd5.equalsIgnoreCase("f836a37a5eee5dec0611ce15a76e8fd5")) {
+                        Log.e(TAG, "file is wrong because of md5 is wrong " + realMd5);
+                    }
+                }
             }
         });
     }
+
+    @SuppressFBWarnings(value = "REC")
+    public static String fileToMD5(String filePath) {
+        InputStream inputStream = null;
+        try {
+            inputStream = new FileInputStream(filePath);
+            byte[] buffer = new byte[1024];
+            MessageDigest digest = MessageDigest.getInstance("MD5");
+            int numRead = 0;
+            while (numRead != -1) {
+                numRead = inputStream.read(buffer);
+                if (numRead > 0) {
+                    digest.update(buffer, 0, numRead);
+                }
+            }
+            byte[] md5Bytes = digest.digest();
+            return convertHashToString(md5Bytes);
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (inputStream != null) {
+                try {
+                    inputStream.close();
+                } catch (Exception e) {
+                    Log.e(TAG, "file to md5 failed", e);
+                }
+            }
+        }
+    }
+
+    private static String convertHashToString(byte[] md5Bytes) {
+        StringBuffer buf = new StringBuffer();
+        for (int i = 0; i < md5Bytes.length; i++) {
+            buf.append(Integer.toString((md5Bytes[i] & 0xff) + 0x100, 16).substring(1));
+        }
+        return buf.toString().toUpperCase();
+    }
+
 
     private boolean isTaskRunning() {
         final StatusUtil.Status status = StatusUtil.getStatus(task);

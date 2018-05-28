@@ -17,11 +17,13 @@
 package com.liulishuo.okdownload.core.listener;
 
 import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 
 import com.liulishuo.okdownload.DownloadTask;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
+import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
-import com.liulishuo.okdownload.core.listener.assist.DownloadListener1Assist;
+import com.liulishuo.okdownload.core.listener.assist.Listener1Assist;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -34,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -49,25 +52,35 @@ public class DownloadListener1Test {
 
     @Mock private DownloadTask task;
     @Mock private BreakpointInfo info;
+    @Mock private Listener1Assist assist;
 
     private Map<String, List<String>> tmpFields;
+
 
     @Before
     public void setup() {
         initMocks(this);
 
-        listener1 = spy(new DownloadListener1(mock(DownloadListener1Assist.class)) {
+        listener1 = spy(new DownloadListener1(assist) {
+            @Override
+            public void taskStart(@NonNull DownloadTask task,
+                                  @NonNull Listener1Assist.Listener1Model model) { }
 
             @Override
-            public void connected(DownloadTask task, int blockCount, long currentOffset,
-                                  long totalLength) {
-            }
+            public void retry(@NonNull DownloadTask task, @NonNull ResumeFailedCause cause) { }
 
-            @Override public void progress(DownloadTask task, long currentOffset) {
-            }
+            @Override
+            public void connected(@NonNull DownloadTask task, int blockCount, long currentOffset,
+                                  long totalLength) { }
 
-            @Override public void retry(DownloadTask task, @NonNull ResumeFailedCause cause) {
-            }
+            @Override
+            public void progress(@NonNull DownloadTask task, long currentOffset,
+                                 long totalLength) { }
+
+            @Override
+            public void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                                @Nullable Exception realCause,
+                                @NonNull Listener1Assist.Listener1Model model) { }
         });
 
         tmpFields = new HashMap<>();
@@ -78,20 +91,20 @@ public class DownloadListener1Test {
     @Test
     public void taskStart() {
         listener1.taskStart(task);
-        verify(listener1.assist).taskStart(eq(task.getId()));
+        verify(listener1.assist).taskStart(eq(task));
     }
 
     @Test
     public void downloadFromBeginning() {
         final ResumeFailedCause cause = mock(ResumeFailedCause.class);
         listener1.downloadFromBeginning(task, info, cause);
-        verify(listener1.assist).downloadFromBeginning(eq(task), eq(cause));
+        verify(listener1.assist).downloadFromBeginning(eq(task), eq(info), eq(cause));
     }
 
     @Test
     public void downloadFromBreakpoint() {
         listener1.downloadFromBreakpoint(task, info);
-        verify(listener1.assist).downloadFromBreakpoint(eq(task.getId()), eq(info));
+        verify(listener1.assist).downloadFromBreakpoint(eq(task), eq(info));
     }
 
     @Test
@@ -101,14 +114,32 @@ public class DownloadListener1Test {
     }
 
     @Test
-    public void splitBlockEnd() {
-        listener1.splitBlockEnd(task, info);
-        verify(listener1.assist).splitBlockEnd(eq(task), eq(info));
-    }
-
-    @Test
     public void fetchProgress() {
         listener1.fetchProgress(task, 1, 2);
         verify(listener1.assist).fetchProgress(eq(task), eq(2L));
+    }
+
+    @Test
+    public void isAlwaysRecoverAssistModel() {
+        when(assist.isAlwaysRecoverAssistModel()).thenReturn(true);
+        assertThat(listener1.isAlwaysRecoverAssistModel()).isTrue();
+        when(assist.isAlwaysRecoverAssistModel()).thenReturn(false);
+        assertThat(listener1.isAlwaysRecoverAssistModel()).isFalse();
+    }
+
+    @Test
+    public void setAlwaysRecoverAssistModel() {
+        listener1.setAlwaysRecoverAssistModel(true);
+        verify(assist).setAlwaysRecoverAssistModel(eq(true));
+        listener1.setAlwaysRecoverAssistModel(false);
+        verify(assist).setAlwaysRecoverAssistModel(eq(false));
+    }
+
+    @Test
+    public void setAlwaysRecoverAssistModelIfNotSet() {
+        listener1.setAlwaysRecoverAssistModelIfNotSet(true);
+        verify(assist).setAlwaysRecoverAssistModelIfNotSet(eq(true));
+        listener1.setAlwaysRecoverAssistModelIfNotSet(false);
+        verify(assist).setAlwaysRecoverAssistModelIfNotSet(eq(false));
     }
 }

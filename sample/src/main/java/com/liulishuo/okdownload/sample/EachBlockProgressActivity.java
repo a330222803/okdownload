@@ -24,16 +24,20 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import com.liulishuo.okdownload.DownloadTask;
+import com.liulishuo.okdownload.SpeedCalculator;
 import com.liulishuo.okdownload.StatusUtil;
 import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.listener.DownloadListener4WithSpeed;
+import com.liulishuo.okdownload.core.listener.assist.Listener4SpeedAssistExtend;
 import com.liulishuo.okdownload.sample.base.BaseSampleActivity;
+import com.liulishuo.okdownload.sample.util.DemoUtil;
 import com.liulishuo.okdownload.sample.util.EachBlockProgressUtil;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.io.File;
 import java.util.List;
 import java.util.Map;
 
@@ -106,8 +110,33 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
     }
 
     private void initTask() {
-        task = EachBlockProgressUtil.createTask(this);
+        task = createTask();
     }
+
+    private DownloadTask createTask() {
+        final String url =
+                "https://cdn.llscdn.com/yy/files/xs8qmxn8-lls-LLS-5.8-800-20171207-111607.apk";
+        return createTask(url);
+    }
+
+    private DownloadTask createSameFileAnotherUrlTask() {
+        final String anotherUrl =
+                "http://dldir1.qq.com/weixin/android/seixin6516android1120.apk";
+        return createTask(anotherUrl);
+    }
+
+    private DownloadTask createTask(String url) {
+        final String filename = "each-block-progress-test";
+        final File parentFile = DemoUtil.getParentFile(this);
+        return new DownloadTask.Builder(url, parentFile)
+                .setFilename(filename)
+                // the minimal interval millisecond for callback progress
+                .setMinIntervalMillisCallbackProcess(64)
+                // ignore the same task has already completed in the past.
+                .setPassIfAlreadyCompleted(false)
+                .build();
+    }
+
 
     private void initStatus(TextView statusTv,
                             ProgressBar taskPb,
@@ -118,6 +147,9 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                             TextView block2TitleTv, TextView block3TitleTv) {
         final StatusUtil.Status status = StatusUtil.getStatus(task);
         statusTv.setText(status.toString());
+        if (status == StatusUtil.Status.COMPLETED) {
+            taskPb.setProgress(taskPb.getMax());
+        }
 
         final BreakpointInfo info = StatusUtil.getCurrentInfo(task);
         if (info != null) {
@@ -176,8 +208,7 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                 final boolean started = task.getTag() != null;
                 if (!started) return;
 
-                final DownloadTask task = EachBlockProgressUtil
-                        .createTask(EachBlockProgressActivity.this);
+                final DownloadTask task = createTask();
                 task.enqueue(EachBlockProgressUtil.createSampleListener(extInfoTv));
             }
         });
@@ -188,8 +219,7 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                 final boolean started = task.getTag() != null;
                 if (!started) return;
 
-                final DownloadTask sameFileAnotherUrlTask = EachBlockProgressUtil
-                        .createSameFileAnotherUrlTask(EachBlockProgressActivity.this);
+                final DownloadTask sameFileAnotherUrlTask = createSameFileAnotherUrlTask();
                 sameFileAnotherUrlTask
                         .enqueue(EachBlockProgressUtil.createSampleListener(extInfoTv));
             }
@@ -207,14 +237,15 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                            final TextView block0SpeedTv, final TextView block1SpeedTv,
                            final TextView block2SpeedTv, final TextView block3SpeedTv) {
         task.enqueue(new DownloadListener4WithSpeed() {
-            @Override public void taskStart(DownloadTask task) {
-                super.taskStart(task);
 
+            @Override public void taskStart(@NonNull DownloadTask task) {
                 statusTv.setText(R.string.task_start);
             }
 
-            @Override public void infoReady(DownloadTask task, @NonNull BreakpointInfo info,
-                                               boolean fromBreakpoint) {
+            @Override
+            public void infoReady(@NonNull DownloadTask task, @NonNull BreakpointInfo info,
+                                  boolean fromBreakpoint,
+                                  @NonNull Listener4SpeedAssistExtend.Listener4SpeedModel model) {
                 EachBlockProgressUtil
                         .initTitle(info, taskTitleTv, block0TitleTv, block1TitleTv, block2TitleTv,
                                 block3TitleTv);
@@ -222,9 +253,25 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                         .initProgress(info, taskPb, block0Pb, block1Pb, block2Pb, block3Pb);
             }
 
+            @Override public void connectStart(@NonNull DownloadTask task, int blockIndex,
+                                               @NonNull Map<String, List<String>> requestHeaders) {
+                final String status = "connectStart " + blockIndex + " " + requestHeaders;
+                statusTv.setText(status);
+            }
+
             @Override
-            public void progressBlock(DownloadTask task, int blockIndex,
-                                         long currentBlockOffset) {
+            public void connectEnd(@NonNull DownloadTask task, int blockIndex, int responseCode,
+                                   @NonNull Map<String, List<String>> responseHeaders) {
+                final String status = "connectEnd " + blockIndex + " " + responseCode + " "
+                        + responseHeaders;
+                statusTv.setText(status);
+
+            }
+
+            @Override
+            public void progressBlock(@NonNull DownloadTask task, int blockIndex,
+                                      long currentBlockOffset,
+                                      @NonNull SpeedCalculator blockSpeed) {
                 final ProgressBar progressBar = EachBlockProgressUtil
                         .getProgressBar(blockIndex, block0Pb, block1Pb, block2Pb, block3Pb);
 
@@ -233,50 +280,33 @@ public class EachBlockProgressActivity extends BaseSampleActivity {
                 final TextView speedTv = EachBlockProgressUtil.getSpeedTv(blockIndex,
                         block0SpeedTv, block1SpeedTv, block2SpeedTv, block3SpeedTv);
 
-                if (speedTv != null) speedTv.setText(blockSpeed(blockIndex).speed());
+                if (speedTv != null) speedTv.setText(blockSpeed.speed());
+
             }
 
-            @Override public void progress(DownloadTask task, long currentOffset) {
+            @Override public void progress(@NonNull DownloadTask task, long currentOffset,
+                                           @NonNull SpeedCalculator taskSpeed) {
                 statusTv.setText(R.string.fetch_progress);
 
                 EachBlockProgressUtil.updateProgress(taskPb, currentOffset);
-                taskSpeedTv.setText(taskSpeed().speed());
+                taskSpeedTv.setText(taskSpeed.speed());
             }
 
-            @Override public void blockEnd(DownloadTask task, int blockIndex, BlockInfo info) {
+            @Override
+            public void blockEnd(@NonNull DownloadTask task, int blockIndex, BlockInfo info,
+                                 @NonNull SpeedCalculator blockSpeed) {
                 final TextView speedTv = EachBlockProgressUtil.getSpeedTv(blockIndex,
                         block0SpeedTv, block1SpeedTv, block2SpeedTv, block3SpeedTv);
 
-                if (speedTv != null) speedTv.setText(blockSpeed(blockIndex).speedFromBegin());
+                if (speedTv != null) speedTv.setText(blockSpeed.averageSpeed());
             }
 
-            @Override public void connectStart(DownloadTask task, int blockIndex,
-                                               @NonNull Map<String, List<String>> requestHeaders) {
-                final String status = "connectStart " + blockIndex + " " + requestHeaders;
-                statusTv.setText(status);
-            }
 
-            @Override public void connectEnd(DownloadTask task, int blockIndex, int responseCode,
-                                             @NonNull Map<String, List<String>> responseHeaders) {
-                final String status = "connectEnd " + blockIndex + " " + responseCode + " "
-                        + responseHeaders;
-                statusTv.setText(status);
-
-            }
-
-            @Override
-            public void fetchStart(DownloadTask task, int blockIndex, long contentLength) {
-                super.fetchStart(task, blockIndex, contentLength);
-                final String status = "fetchStart " + blockIndex + " " + contentLength;
-                statusTv.setText(status);
-            }
-
-            @Override
-            protected void taskEnd(DownloadTask task, EndCause cause,
-                                   @android.support.annotation.Nullable Exception realCause,
-                                   @NonNull String averageSpeed) {
+            @Override public void taskEnd(@NonNull DownloadTask task, @NonNull EndCause cause,
+                                          @android.support.annotation.Nullable Exception realCause,
+                                          @NonNull SpeedCalculator taskSpeed) {
                 statusTv.setText(cause.toString());
-                taskSpeedTv.setText(averageSpeed);
+                taskSpeedTv.setText(taskSpeed.averageSpeed());
 
                 actionTv.setText(R.string.start);
                 // mark

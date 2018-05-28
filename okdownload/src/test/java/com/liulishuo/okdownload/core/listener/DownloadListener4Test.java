@@ -24,7 +24,7 @@ import com.liulishuo.okdownload.core.breakpoint.BlockInfo;
 import com.liulishuo.okdownload.core.breakpoint.BreakpointInfo;
 import com.liulishuo.okdownload.core.cause.EndCause;
 import com.liulishuo.okdownload.core.cause.ResumeFailedCause;
-import com.liulishuo.okdownload.core.listener.assist.DownloadListener4Assist;
+import com.liulishuo.okdownload.core.listener.assist.Listener4Assist;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -33,14 +33,11 @@ import org.mockito.Mock;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Java6Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -50,27 +47,42 @@ import static org.robolectric.annotation.Config.NONE;
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = NONE)
 public class DownloadListener4Test {
+
     private DownloadListener4 listener4;
     @Mock private BreakpointInfo info;
     @Mock private DownloadTask task;
     @Mock private ResumeFailedCause resumeFailedCause;
-
-    private Map<String, List<String>> tmpFields;
-
+    @Mock private Listener4Assist assist;
+    @Mock private Listener4Assist.AssistExtend assistExtend;
+    @Mock private EndCause endCause;
+    @Mock private Map<String, List<String>> tmpFields;
+    @Mock private Exception exception;
 
     @Before
     public void setup() {
         initMocks(this);
 
-        tmpFields = new HashMap<>();
-        listener4 = spy(new DownloadListener4(spy(new DownloadListener4Assist())) {
-            @Override public void infoReady(DownloadTask task, @NonNull BreakpointInfo info,
-                                            boolean fromBreakpoint) {
+        listener4 = spy(new DownloadListener4(assist) {
+            @Override public void taskStart(@NonNull DownloadTask task) {
+            }
+
+            @Override public void connectStart(@NonNull DownloadTask task, int blockIndex,
+                                               @NonNull Map<String, List<String>> map) {
             }
 
             @Override
-            public void progressBlock(DownloadTask task, int blockIndex,
-                                      long currentBlockOffset) {
+            public void connectEnd(@NonNull DownloadTask task, int blockIndex, int responseCode,
+                                   @NonNull Map<String, List<String>> responseHeaderFields) {
+            }
+
+            @Override
+            public void infoReady(DownloadTask task, @NonNull BreakpointInfo info,
+                                  boolean fromBreakpoint,
+                                  @NonNull Listener4Assist.Listener4Model model) {
+            }
+
+            @Override
+            public void progressBlock(DownloadTask task, int blockIndex, long currentBlockOffset) {
             }
 
             @Override public void progress(DownloadTask task, long currentOffset) {
@@ -79,85 +91,77 @@ public class DownloadListener4Test {
             @Override public void blockEnd(DownloadTask task, int blockIndex, BlockInfo info) {
             }
 
-            @Override public void taskStart(DownloadTask task) {
-            }
-
-            @Override public void connectStart(DownloadTask task, int blockIndex,
-                                               @NonNull Map<String, List<String>>
-                                                       requestHeaderFields) {
-            }
-
-            @Override public void connectEnd(DownloadTask task, int blockIndex, int responseCode,
-                                             @NonNull Map<String, List<String>>
-                                                     responseHeaderFields) {
-            }
-
             @Override
-            public void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause) {
+            public void taskEnd(DownloadTask task, EndCause cause, @Nullable Exception realCause,
+                                @NonNull Listener4Assist.Listener4Model model) {
             }
         });
     }
 
     @Test
-    public void callback() {
-        final DownloadTask anotherTask = mock(DownloadTask.class);
-        when(anotherTask.getId()).thenReturn(1);
-        final BreakpointInfo anotherInfo = mock(BreakpointInfo.class);
-        when(anotherInfo.getId()).thenReturn(1);
-        final BlockInfo anotherBlockInfo = mock(BlockInfo.class);
-        when(anotherInfo.getBlockCount()).thenReturn(1);
-        when(anotherInfo.getTotalOffset()).thenReturn(1L);
-        when(anotherBlockInfo.getCurrentOffset()).thenReturn(1L);
-        when(anotherBlockInfo.getContentLength()).thenReturn(5L);
-        when(anotherInfo.getBlock(0)).thenReturn(anotherBlockInfo);
+    public void setAssistExtend() {
+        listener4.setAssistExtend(assistExtend);
+        verify(assist).setAssistExtend(assistExtend);
+    }
 
+    @Test
+    public void empty() {
+        listener4.connectTrialStart(task, tmpFields);
+        listener4.connectTrialEnd(task, 0, tmpFields);
+        listener4.fetchStart(task, 0, 0);
+    }
 
-        listener4.taskStart(task);
+    @Test
+    public void downloadFromBeginning() {
         listener4.downloadFromBeginning(task, info, resumeFailedCause);
-        listener4.connectStart(task, 0, tmpFields);
-        listener4.connectEnd(task, 0, 206, tmpFields);
-        when(info.getBlockCount()).thenReturn(3);
-        for (int i = 0; i < 3; i++) {
-            final BlockInfo blockInfo = mock(BlockInfo.class);
-            doReturn(blockInfo).when(info).getBlock(i);
-        }
-        listener4.splitBlockEnd(task, info);
-        verify(listener4.assist).initData(eq(task), eq(info), eq(false));
-        assertThat(listener4.blockCurrentOffsetMap().size()).isEqualTo(3);
-        assertThat(listener4.getCurrentOffset()).isEqualTo(0);
+        verify(assist).infoReady(eq(task), eq(info), eq(false));
+    }
 
-        // another task coming.
-        listener4.taskStart(anotherTask);
-        listener4.downloadFromBreakpoint(anotherTask, anotherInfo);
+    @Test
+    public void downloadFromBreakpoint() {
+        listener4.downloadFromBreakpoint(task, info);
+        verify(assist).infoReady(eq(task), eq(info), eq(true));
+    }
 
-        listener4.fetchStart(task, 0, 30L);
-        listener4.connectStart(task, 1, tmpFields);
-        listener4.connectEnd(task, 1, 206, tmpFields);
+    @Test
+    public void fetchProgress() {
+        listener4.fetchProgress(task, 1, 2);
+        verify(assist).fetchProgress(eq(task), eq(1), eq(2L));
+    }
 
-        // another task running.
-        listener4.connectStart(anotherTask, 0, tmpFields);
-        listener4.connectEnd(anotherTask, 0, 206, tmpFields);
-        listener4.fetchProgress(anotherTask, 0, 2);
-        assertThat(listener4.blockCurrentOffsetMap(anotherTask.getId()).get(0)).isEqualTo(3);
+    @Test
+    public void fetchEnd() {
+        listener4.fetchEnd(task, 1, 2);
+        verify(assist).fetchEnd(eq(task), eq(1));
+    }
 
-        listener4.fetchProgress(task, 1, 10);
-        verify(listener4.assist).fetchProgress(eq(task), eq(1), eq(10L));
+    @Test
+    public void taskEnd() {
+        listener4.taskEnd(task, endCause, exception);
+        verify(assist).taskEnd(eq(task), eq(endCause), eq(exception));
+    }
 
-        listener4.fetchProgress(task, 0, 15);
-        verify(listener4.assist).fetchProgress(eq(task), eq(0), eq(15L));
-        assertThat(listener4.blockCurrentOffsetMap().get(0)).isEqualTo(15L);
-        assertThat(listener4.getCurrentOffset()).isEqualTo(25L);
+    @Test
+    public void isAlwaysRecoverAssistModel() {
+        when(assist.isAlwaysRecoverAssistModel()).thenReturn(true);
+        assertThat(listener4.isAlwaysRecoverAssistModel()).isTrue();
+        when(assist.isAlwaysRecoverAssistModel()).thenReturn(false);
+        assertThat(listener4.isAlwaysRecoverAssistModel()).isFalse();
+    }
 
-        listener4.fetchEnd(task, 0, 30L);
-        verify(listener4.assist).fetchEnd(eq(task), eq(0));
+    @Test
+    public void setAlwaysRecoverAssistModel() {
+        listener4.setAlwaysRecoverAssistModel(true);
+        verify(assist).setAlwaysRecoverAssistModel(eq(true));
+        listener4.setAlwaysRecoverAssistModel(false);
+        verify(assist).setAlwaysRecoverAssistModel(eq(false));
+    }
 
-        // another task running.
-        listener4.fetchProgress(anotherTask, 0, 2);
-        assertThat(listener4.getCurrentOffset(anotherTask.getId())).isEqualTo(5);
-        assertThat(listener4.blockCurrentOffsetMap(anotherTask.getId()).get(0)).isEqualTo(5);
-
-
-        listener4.taskEnd(anotherTask, EndCause.COMPLETE, null);
-        listener4.taskEnd(task, EndCause.COMPLETE, null);
+    @Test
+    public void setAlwaysRecoverAssistModelIfNotSet() {
+        listener4.setAlwaysRecoverAssistModelIfNotSet(true);
+        verify(assist).setAlwaysRecoverAssistModelIfNotSet(eq(true));
+        listener4.setAlwaysRecoverAssistModelIfNotSet(false);
+        verify(assist).setAlwaysRecoverAssistModelIfNotSet(eq(false));
     }
 }

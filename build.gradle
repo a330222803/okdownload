@@ -8,29 +8,8 @@ subprojects {
         mavenCentral()
     }
 
-    plugins.apply('checkstyle')
-
-    task('checkstyle', type: Checkstyle) {
-        configFile rootProject.file('checkstyle.xml')
-        source 'src/main/java'
-        source 'src/test/java'
-        ignoreFailures false
-        showViolations true
-        include '**/*.java'
-
-        classpath = files()
-    }
-
     group = GROUP
     version = VERSION_NAME
-
-    afterEvaluate {
-        tasks.findByName('check').dependsOn('checkstyle')
-    }
-
-    checkstyle {
-        toolVersion = '6.18'
-    }
 }
 
 apply from: rootProject.file('gradle/dependencies.gradle')
@@ -39,17 +18,25 @@ buildscript {
     repositories {
         jcenter()
         google()
+        maven { url "https://oss.sonatype.org/content/repositories/snapshots/" }
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.0.1'
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.1.51"
+        classpath 'com.liulishuo.okcheck:gradle:0.1.8-SNAPSHOT'
+        classpath 'com.android.tools.build:gradle:3.2.0-alpha15'
+        classpath 'com.jfrog.bintray.gradle:gradle-bintray-plugin:1.7.3'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.2.30"
     }
 }
 
 allprojects {
+    apply plugin: 'okcheck'
     repositories {
         jcenter()
         google()
+    }
+
+    okcheck {
+        destination = buildDir
     }
 }
 
